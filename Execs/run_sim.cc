@@ -94,6 +94,7 @@ int main(int argc, char* argv[]) {
 	fluid_3d f3d(&gm, mgmt, &spars);
     // Part of initialization also sets time scale, espeically when there's non-trivial initial velocities
     int init_err = f3d.initialize();
+    f3d.setup_hit_background();
 
 	// check if user specified time spacing, combine with
 	// frames for stepper object

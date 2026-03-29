@@ -25,6 +25,9 @@ sim_params::sim_params(const char *fn):
     // fluid velocity profile and material constants
     vel_prof_num(0),
     frho(1), fmu (0.002), fdt_pad(0.5),
+    turb_iso_enable(false), turb_mode_count(64),
+    turb_kf2(3), turb_seed(13579),
+    turb_kd(50.), turb_re_lam(84.),
 	vel_profile(NULL),
     // solid params, assume no solid, only add as user provides
     n_obj(0), nlayers(8),
@@ -171,6 +174,22 @@ sim_params::sim_params(const char *fn):
             fmu = final_double(ln);
         } else if(se(bp, "fdt_pad")){
             fdt_pad = final_double(ln);
+             } else if(se(bp, "turb_iso_enable")){
+            turb_iso_enable = final_int(ln);
+        } else if(se(bp, "turb_mode_count")){
+            int tmp = final_int(ln);
+            if(tmp > 0) turb_mode_count = tmp;
+        } else if(se(bp, "turb_kf2")){
+            int tmp = final_int(ln);
+            if(tmp > 0) turb_kf2 = tmp;
+        } else if(se(bp, "turb_seed")){
+            turb_seed = final_int(ln);
+        } else if(se(bp, "turb_kd")){
+            double tmp = final_double(ln);
+            if(tmp > 0) turb_kd = tmp;
+        } else if(se(bp, "turb_re_lam")){
+            double tmp = final_double(ln);
+            if(tmp > 0) turb_re_lam = tmp;
         } else if(se(bp, "vel_prof_num")){
             vel_prof_num = final_int(ln);
             if(vel_prof_num>0){
@@ -471,6 +490,12 @@ void sim_params::print_params(){
            "                                      (0 1 0 1 0 1)\n"
            "            fmu                       (0.002)                  double\n"
            "            fdt_pad                   (0.5)                    double\n"
+            "            turb_iso_enable           0/1(0)                   bool\n"
+           "            turb_mode_count           (64)                     int\n"
+           "            turb_kf2                  (3)                      int\n"
+           "            turb_seed                 (13579)                  int\n"
+           "            turb_kd                   (50.)                    double\n"
+           "            turb_re_lam               (84.)                    double\n"
            "            n_obj                     (0)                      int\n"
            "            nlayers                   (8)                      int\n"
            "            wt_n                      (2.5)                    double\n"
@@ -529,6 +554,12 @@ void sim_params::write_params(const char * chk_dirname){
                     "# FLUID PROPERTIES\n"
                     "fmu                       %g#(0.002)               double\n"
                     "fdt_pad                   %g#(0.5)                 double\n"
+                     "turb_iso_enable           %d#(0)                   bool\n"
+                    "turb_mode_count           %d#(64)                  int\n"
+                    "turb_kf2                  %d#(3)                   int\n"
+                    "turb_seed                 %d#(13579)               int\n"
+                    "turb_kd                   %g#(50.)                 double\n"
+                    "turb_re_lam               %g#(84.)                 double\n"
                     "# SOLID PROPERTIES\n"
                     "n_obj                     %d#(0)                   int\n"
                     "nlayers                   %d#(8)                   int\n"
@@ -547,6 +578,7 @@ void sim_params::write_params(const char * chk_dirname){
                     dt, T, cur_time,
                     ax,bx,ay,by,az,bz,
                     sim_type, fmu, fdt_pad,
+                    turb_iso_enable, turb_mode_count, turb_kf2, turb_seed, turb_kd, turb_re_lam,
                     n_obj, nlayers, wt_n, ex_visc_mult,
                     ev_trans_mult, sdt_pad, dt_ex_pad, gravity);
                     fprintf(fh, "# SOLIDS CONFIGURATIONS\n");

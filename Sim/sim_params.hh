@@ -87,6 +87,13 @@ class sim_params{
     int vel_prof_num;
 	const double frho;
     double fmu, fdt_pad;
+    /** isotropic turbulence background switches/parameters */
+    bool turb_iso_enable;
+    int turb_mode_count;
+    int turb_kf2;
+    int turb_seed;
+    double turb_kd;
+    double turb_re_lam;
     //VELOCITY PROFILE:
     //NO INITIAL VELOCITIES=0
     //CONSTANT X 1 vx

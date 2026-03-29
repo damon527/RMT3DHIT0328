@@ -269,6 +269,8 @@ class fluid_3d {
 
 	/** Problem set up */
 	int initialize();
+	/** optional hook for external callers to pre-configure HIT background state */
+    void setup_hit_background();
 	void init_iter(int init_err);
     int initialize_from_chk_point(const char * chk_dirname);
     void init_from_slice(write_params wp, double * g_val);
@@ -386,7 +388,8 @@ class fluid_3d {
 	void viscous_step(field *node);
 	void eno_step(field *node);
 	void source_step(field *node,double fx_,double fy_,double fz_);
-
+        void update_isotropic_turbulence_forcing();
+        
 	// data output (slices, contour plotting and errors)
 	void alloc_tracers();
 	void set_dump(int dim,int pnt);

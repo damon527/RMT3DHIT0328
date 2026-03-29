@@ -2,6 +2,7 @@
 #define SIM_MANAGER_
 
 #include <cmath>
+#include <vector>
 #include "defs.hh"
 #include "geometry.hh"
 #include "object.hh"
@@ -141,6 +142,25 @@ class sim_manager {
 	double weight_fac;
     /** Maximum velocity in the simulation, used in CFL calculation */
     double vmax;
+      /** isotropic turbulence background model */
+    struct turb_mode {
+        int k[3];
+        double a[3];
+        double b[3];
+        double norm;
+    };
+    bool turb_iso_enable;
+    int turb_kf2;
+    int turb_seed;
+    int turb_mode_count;
+    double turb_kd;
+    double turb_re_lam;
+    double turb_target_energy;
+    double turb_force_alpha;
+    double turb_last_update_t;
+    std::vector<turb_mode> turb_modes;
+    std::vector<double> turb_coeff_init;
+    std::vector<double> turb_coeff_curr;
 
 
 	/** pointers to immersed objects */
@@ -173,6 +193,12 @@ class sim_manager {
 	dxsp(1./dx), dysp(1./dy), dzsp(1./dz),
 	lx(spars->lx), ly(spars->ly), lz(spars->lz),
     weight_fac(spars->weight_fac), vmax(1),
+     turb_iso_enable(spars->turb_iso_enable),
+    turb_kf2(spars->turb_kf2), turb_seed(spars->turb_seed),
+    turb_mode_count(spars->turb_mode_count),
+    turb_kd(spars->turb_kd), turb_re_lam(spars->turb_re_lam),
+    turb_target_energy(0), turb_force_alpha(1),
+    turb_last_update_t(-1),
     objs(n_obj==0?NULL:new object*[n_obj]),
     avg_velx(n_obj==0?NULL:new double[n_obj]),
     avg_vely(n_obj==0?NULL:new double[n_obj]),
@@ -206,6 +232,7 @@ class sim_manager {
         // Must be called in order, otherwise setup_const() doesn't see any objects
         reset_avgs();
         create_objs();
+        setup_isotropic_turbulence();
         setup_const();
     }
     virtual void reset_avgs(){
@@ -306,7 +333,19 @@ class sim_manager {
 
 	/** specifies the body force at time t */
 	virtual void fluid_acceleration(double x,double y,double z,double t,
-		double &fx,double &fy,double &fz) { fx = fy = fz = 0; }
+		double &fx,double &fy,double &fz) {
+            fx = fy = fz = 0;
+            if(turb_iso_enable) isotropic_turbulence_force(x, y, z, fx, fy, fz);
+        }
+
+    void update_isotropic_turbulence_state(double kinetic_energy, const std::vector<double> &proj_dot, double dt, double t);
+    void isotropic_turbulence_velocity(double x, double y, double z,
+        double &u, double &v, double &w) const;
+    void isotropic_turbulence_force(double x, double y, double z,
+        double &fx, double &fy, double &fz) const;
+    size_t isotropic_turbulence_mode_count() const { return turb_modes.size(); }
+    void isotropic_turbulence_basis(size_t mode_id, double x, double y, double z,
+        double &u, double &v, double &w) const;
 
 	virtual void solid_acceleration(const int obj_id, const double (&rval)[3], double x, double y, double z, double t, double &fx,double &fy,double &fz);
 	//virtual void solid_acceleration(const int obj_id, const double (&rval)[3], double x, double y, double z, double t,	double &fx,double &fy,double &fz, const double vx=std::nan(""), const double vy=std::nan(""), const double vz=std::nan(""));
@@ -317,6 +356,9 @@ class sim_manager {
     };
 
 	virtual double phi(int obj_index, const double (&xi)[3]) const;
+	
+	private:
+    void setup_isotropic_turbulence();
 };
 
 class sim_ftest : public sim_manager {
@@ -400,6 +442,7 @@ class sim_objects: public sim_manager {
     virtual void fluid_acceleration(double x,double y,double z,double t,
         double &fx,double &fy,double &fz) {
         fx = fy = fz = 0;
+        if(turb_iso_enable) isotropic_turbulence_force(x, y, z, fx, fy, fz);
         fz += gravity;
     }
 	virtual void solid_acceleration(const int obj_id, const double (&rval)[3], double x, double y, double z, double t,	double &fx,double &fy,double &fz);

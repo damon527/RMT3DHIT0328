@@ -232,6 +232,13 @@ int fluid_3d::initialize() {
     return init_err;
 }
 
+void fluid_3d::setup_hit_background() {
+    // external driver hook (e.g. run_sim) for HIT setup.
+    // For this solver, turbulence forcing gain depends on the current flow field,
+    // so we initialize it from the present state using the same runtime updater.
+    update_isotropic_turbulence_forcing();
+}
+
 void fluid_3d::init_iter(int init_err){
 
     // We do some iteration to get a good estimate of pressure
@@ -455,6 +462,8 @@ int fluid_3d::step_forward(int debug){
 
 	if (out != NULL && rank == 0) out[0] = '\0';
 
+update_isotropic_turbulence_forcing();
+
 	if (trace) {
 //	if (rank==0) printf("FIRST TRACER\n");
 		tr->predict();
@@ -574,6 +583,41 @@ int fluid_3d::step_forward(int debug){
 	if(basic_v) {puts("");}
 
     return NORMAL_EXIT;
+}
+
+void fluid_3d::update_isotropic_turbulence_forcing() {
+    if(!mgmt->turb_iso_enable) return;
+    size_t nmodes = mgmt->isotropic_turbulence_mode_count();
+    double local_sum = 0;
+    std::vector<double> local_dot(nmodes, 0.0), global_dot(nmodes, 0.0);
+    for (int kk = 0; kk < so; kk++) {
+        double z = lz0[kk];
+        for (int jj = 0; jj < sn; jj++) {
+            double y = ly0[jj];
+            for (int ii = 0; ii < sm; ii++) {
+                field &f = u0[index(ii, jj, kk)];
+                local_sum += f.vel[0]*f.vel[0] + f.vel[1]*f.vel[1] + f.vel[2]*f.vel[2];
+                if(nmodes > 0) {
+                    double x = lx0[ii];
+                    for(size_t m=0;m<nmodes;m++) {
+                        double bu, bv, bw;
+                        mgmt->isotropic_turbulence_basis(m, x, y, z, bu, bv, bw);
+                        local_dot[m] += (f.vel[0]*bu + f.vel[1]*bv + f.vel[2]*bw);
+                    }
+                }
+            }
+        }
+    }
+    double global_sum = 0;
+    MPI_Allreduce(&local_sum, &global_sum, 1, MPI_DOUBLE, MPI_SUM, world);
+    const double vcell = dx*dy*dz;
+    const double vol = mgmt->lx*mgmt->ly*mgmt->lz;
+    double kinetic_energy = 0.5*global_sum*vcell/vol;
+    if(nmodes > 0) {
+        MPI_Allreduce(local_dot.data(), global_dot.data(), static_cast<int>(nmodes), MPI_DOUBLE, MPI_SUM, world);
+        for(size_t m=0;m<nmodes;m++) global_dot[m] *= vcell/vol;
+    }
+    mgmt->update_isotropic_turbulence_state(kinetic_energy, global_dot, dt, time);
 }
 
 /** Pre-compute monotonocity-limited normal derivatives and extrapolated face vels.
