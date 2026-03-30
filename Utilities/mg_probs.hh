@@ -482,7 +482,7 @@ class simp_fem: public mg_prob {
             // tol scales with central node (32)
             double eps = std::numeric_limits<double>::epsilon();
             tol = 32*32*eps*eps*1e4;
-            max_norm_tol = 32*eps*1e2;
+            max_norm_tol = 1e-9;
             //max_norm_tol = 1e-8;
             log_tol = log10(tol);
 
@@ -515,7 +515,7 @@ class simp_mac: public mg_prob {
             // tol scales with central node (6)
             double eps = std::numeric_limits<double>::epsilon();
             tol =6*6*eps*eps*1e4;
-            max_norm_tol = 6*eps*1e2;
+            max_norm_tol =1e-9;
             //max_norm_tol = 1e-8;
             log_tol = log10(tol);
 
@@ -553,7 +553,7 @@ class simp_visc: public mg_prob {
             // tol scales with central node (1)
             double eps = std::numeric_limits<double>::epsilon();
             tol = eps*eps*1e4;
-            max_norm_tol = eps*1e2;
+            max_norm_tol = 1e-9;
             //max_norm_tol = 1e-8;
             log_tol = log10(tol);
 
@@ -641,7 +641,7 @@ class var_den_fem: public var_den_mg_prob{
             // tol scales with central node (32)
             double eps = std::numeric_limits<double>::epsilon();
             tol = 32*32*eps*eps*1e4;
-            max_norm_tol = 32*eps*1e2;
+            max_norm_tol = 1e-9;
             //max_norm_tol = 1e-8;
             log_tol = log10(tol);
 
@@ -676,7 +676,7 @@ class var_den_mac: public var_den_mg_prob{
             // tol scales with central node (6)
             double eps = std::numeric_limits<double>::epsilon();
             tol =6*6*eps*eps*1e4;
-            max_norm_tol = 6*eps*1e2;
+            max_norm_tol = 1e-9;
             //max_norm_tol = 1e-8;
             log_tol = log10(tol);
 
