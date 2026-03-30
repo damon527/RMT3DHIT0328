@@ -89,11 +89,17 @@ class sim_params{
     double fmu, fdt_pad;
     /** isotropic turbulence background switches/parameters */
     bool turb_iso_enable;
+    bool hit_cold_start_enable;
+    bool hit_keep_forcing_after_insert;
+    bool hit_write_background_chk;
     int turb_mode_count;
     int turb_kf2;
     int turb_seed;
+    int hit_pre_iter_steps;
+    int hit_background_chk_num;
     double turb_kd;
     double turb_re_lam;
+     double hit_cold_start_time;
     //VELOCITY PROFILE:
     //NO INITIAL VELOCITIES=0
     //CONSTANT X 1 vx

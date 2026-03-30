@@ -271,6 +271,10 @@ class fluid_3d {
 	int initialize();
 	/** optional hook for external callers to pre-configure HIT background state */
     void setup_hit_background();
+    /** runtime controls used by HIT cold-start workflow */
+    void set_active_object_count(int nobj);
+    void set_hit_forcing_enabled(bool enabled);
+    void insert_particles_from_current_objects();
 	void init_iter(int init_err);
     int initialize_from_chk_point(const char * chk_dirname);
     void init_from_slice(write_params wp, double * g_val);

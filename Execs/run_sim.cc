@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -65,6 +66,13 @@ int main(int argc, char* argv[]) {
 	geometry gm(spars.sys_size[0],spars.sys_size[1],spars.sys_size[2],spars.x_prd,spars.y_prd,spars.z_prd);
 	// initialize sim_type and geometry, get CFL max dt
 	sim_manager *mgmt = sim_manager_alloc(&spars);
+	  const int configured_n_obj = spars.n_obj;
+    const bool do_hit_cold_start = spars.hit_cold_start_enable && spars.turb_iso_enable && (configured_n_obj>0);
+    const bool use_recovered_background = do_hit_cold_start && (spars.chk_num>0);
+    if(do_hit_cold_start && !use_recovered_background) {
+        // Single-phase warmup stage.
+        mgmt->n_obj = 0;
+    }
     if(rank==0) mkdir(spars.dirname,S_IRWXU|S_IRWXG|S_IROTH|S_IXOTH);
 
 	if (rank == 0) {
@@ -102,9 +110,56 @@ int main(int argc, char* argv[]) {
         spars.dt = mgmt->dt_reg;
     }
 
+f3d.init_iter(init_err);
+
+    if(do_hit_cold_start) {
+        if(rank==0) {
+            if(use_recovered_background) {
+                printf("# HIT cold-start: recovered background detected, skip single-phase warmup.\n");
+            } else {
+                printf("# HIT cold-start: warm up single-phase HIT for %.6g seconds.\n", spars.hit_cold_start_time);
+            }
+        }
+
+        if(!use_recovered_background) {
+            const int warm_steps = (spars.hit_cold_start_time>0. && spars.dt>0.) ? static_cast<int>(ceil(spars.hit_cold_start_time/spars.dt)) : 0;
+            if(rank==0) printf("# HIT cold-start: warmup steps = %d\n", warm_steps);
+            for(int i=0;i<warm_steps;i++) f3d.step_forward(spars.debug_flag);
+
+            if(spars.hit_write_background_chk) {
+                int bg_chk = spars.hit_background_chk_num;
+                if(bg_chk<0) bg_chk = 0;
+                char bg_chk_dir[256];
+                sprintf(bg_chk_dir, "%s/chk.%05d", spars.dirname, bg_chk);
+                if(rank==0) mkdir(bg_chk_dir,S_IRWXU|S_IRWXG|S_IROTH|S_IXOTH);
+                f3d.write_chk_pt(warm_steps, bg_chk, bg_chk_dir);
+                if(rank==0) printf("# HIT cold-start: wrote background checkpoint %s\n", bg_chk_dir);
+            }
+        }
+
+        // Insert particles and optionally keep/stop HIT forcing.
+        f3d.set_active_object_count(configured_n_obj);
+        f3d.insert_particles_from_current_objects();
+        f3d.set_hit_forcing_enabled(spars.hit_keep_forcing_after_insert);
+        if(rank==0) {
+            printf("# HIT cold-start: particle insertion done, forcing after insert = %s\n",
+                   spars.hit_keep_forcing_after_insert?"ON":"OFF");
+        }
+
+        const int pre_steps = (spars.hit_pre_iter_steps>0)?spars.hit_pre_iter_steps:0;
+        if(rank==0) printf("# HIT cold-start: pre-iterations after insertion = %d\n", pre_steps);
+        for(int i=0;i<pre_steps;i++) f3d.step_forward(spars.debug_flag);
+
+        // Preprocessing complete: reset counters for production run.
+        f3d.nt = 0;
+        f3d.time = 0;
+        spars.chk_step = 0;
+        spars.chk_num = 0;
+        spars.set_current_time(0);
+    }
+
 	stepper sim(spars,f3d);
 	f3d.dt = sim.dt;
-	f3d.init_iter(init_err);
 
     if(rank == 0){
 

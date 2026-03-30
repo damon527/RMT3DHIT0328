@@ -239,6 +239,24 @@ void fluid_3d::setup_hit_background() {
     update_isotropic_turbulence_forcing();
 }
 
+void fluid_3d::set_active_object_count(int nobj) {
+    if(nobj < 0) nobj = 0;
+    int max_obj = spars->n_obj;
+    if(nobj > max_obj) nobj = max_obj;
+    mgmt->n_obj = nobj;
+}
+
+void fluid_3d::set_hit_forcing_enabled(bool enabled) {
+    mgmt->turb_iso_enable = enabled;
+}
+
+void fluid_3d::insert_particles_from_current_objects() {
+    init_refmap();
+    extraps.reset();
+    init_extrapolate(false);
+    compute_stress(0);
+}
+
 void fluid_3d::init_iter(int init_err){
 
     // We do some iteration to get a good estimate of pressure
@@ -358,6 +376,9 @@ void fluid_3d::init_refmap(){
     // Set every reference map to be a void point to begin with
     for (int i=0;i<smn4*so4;i++) {
         rm_mem[i].reset();
+        #if defined(VAR_DEN)
+        lrho[i] = mgmt->fm.rho;
+#endif
     }
 
 	for (int k = 2; k < so4-2; k++) {
