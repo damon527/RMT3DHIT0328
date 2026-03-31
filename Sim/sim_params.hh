@@ -125,6 +125,7 @@ class sim_params{
     //CUBE=3
     //THREE_POINT_ROTOR=4
     int * object_list;
+    int * object_is_fixed;
     double * srho;
     double * shear_mod;
 	double * basic_specs; // user specified center and dimensions of the objects
@@ -147,6 +148,7 @@ class sim_params{
 		if (srho!=NULL) delete [] srho;
 		if (shear_mod!=NULL) delete [] shear_mod;
 		if (object_list!=NULL) delete [] object_list;
+		if (object_is_fixed!=NULL) delete [] object_is_fixed;
 		if (vel_profile!=NULL) delete [] vel_profile;
 		if (dirname!=NULL) delete [] dirname;
 	}

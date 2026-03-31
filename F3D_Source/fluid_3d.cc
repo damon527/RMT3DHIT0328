@@ -1213,7 +1213,11 @@ void fluid_3d::update_rho(){
  */
 int fluid_3d::update_reference_map(const double cdt, bool verbose){
 	if(verbose) printf("Rank %d. Update reference to half step.\n",rank);
-
+const int *obj_fix = spars->object_is_fixed;
+    auto is_fixed_obj = [obj_fix](int oid)->bool{
+        return (obj_fix!=NULL && oid>0 && obj_fix[oid-1]!=0);
+    };
+    
 	//compute half time step adv term. See Yu (2003) Eqn 3.11
 	for (int kk =0; kk < so; kk++) {
 		for (int jj =0; jj < sn; jj++) {
@@ -1224,7 +1228,7 @@ int fluid_3d::update_reference_map(const double cdt, bool verbose){
 
 				// if we're in the primary grid
 				if (sf.oid() > 0 ) {
-					// compute prefactor
+				// compute prefactor
 					double avgs [3] = {0,0,0};
 					avgs[0] =-0.5*cdt*(f.fvel[0][0] + f.fvel[1][0])*dxsp;
 					avgs[1] =-0.5*cdt*(f.fvel[2][1] + f.fvel[3][1])*dysp;
@@ -1267,6 +1271,84 @@ int fluid_3d::update_reference_map(const double cdt, bool verbose){
 	// carry out extrapolation, stored in xpred values
     extrapolate(false);
 
+// For fixed objects, remove only the net translational increment from xpred
+    // while preserving local variations (deformation).
+    if(obj_fix!=NULL && mgmt->n_obj>0){
+        std::vector<double> local_sum(3*mgmt->n_obj, 0.0), global_sum(3*mgmt->n_obj, 0.0);
+        std::vector<double> local_cnt(mgmt->n_obj, 0.0), global_cnt(mgmt->n_obj, 0.0);
+
+        // primary ref_map entries
+        for (int kk = 0; kk < so; kk++) {
+            for (int jj = 0; jj < sn; jj++) {
+                for (int ii = 0; ii < sm; ii++) {
+                    int ind = index(ii, jj, kk);
+                    ref_map &sf = rm0[ind];
+                    int oid = sf.oid();
+                    if(oid<=0 || oid>mgmt->n_obj || !is_fixed_obj(oid)) continue;
+                    int oi = oid - 1;
+                    for(int d=0; d<3; d++) local_sum[3*oi+d] += (sf.xpred[d] - sf.x[d]);
+                    local_cnt[oi] += 1.0;
+                }
+            }
+        }
+
+        // extrapolated entries
+        for (int kk = -2; kk < so+2; kk++) {
+            for (int jj = -2; jj < sn+2; jj++) {
+                for (int ii = -2; ii < sm+2; ii++) {
+                    int ind = index(ii, jj, kk);
+                    for(int ll=0; ll<extraps.n0[ind]; ll++){
+                        ref_map &ext_sf = extraps.f0[ind][ll];
+                        int oid = ext_sf.oid();
+                        if(oid<=0 || oid>mgmt->n_obj || !is_fixed_obj(oid)) continue;
+                        int oi = oid - 1;
+                        for(int d=0; d<3; d++) local_sum[3*oi+d] += (ext_sf.xpred[d] - ext_sf.x[d]);
+                        local_cnt[oi] += 1.0;
+                    }
+                }
+            }
+        }
+
+        MPI_Allreduce(local_sum.data(), global_sum.data(), static_cast<int>(global_sum.size()), MPI_DOUBLE, MPI_SUM, grid->cart);
+        MPI_Allreduce(local_cnt.data(), global_cnt.data(), mgmt->n_obj, MPI_DOUBLE, MPI_SUM, grid->cart);
+
+        std::vector<double> mean_shift(3*mgmt->n_obj, 0.0);
+        for(int oi=0; oi<mgmt->n_obj; oi++){
+            if(!is_fixed_obj(oi+1) || global_cnt[oi] <= 0.0) continue;
+            for(int d=0; d<3; d++) mean_shift[3*oi+d] = global_sum[3*oi+d] / global_cnt[oi];
+        }
+
+        // subtract object-wise translational increment from primary entries
+        for (int kk = 0; kk < so; kk++) {
+            for (int jj = 0; jj < sn; jj++) {
+                for (int ii = 0; ii < sm; ii++) {
+                    int ind = index(ii, jj, kk);
+                    ref_map &sf = rm0[ind];
+                    int oid = sf.oid();
+                    if(oid<=0 || oid>mgmt->n_obj || !is_fixed_obj(oid)) continue;
+                    int oi = oid - 1;
+                    for(int d=0; d<3; d++) sf.xpred[d] -= mean_shift[3*oi+d];
+                }
+            }
+        }
+
+        // ... and from extrapolated entries
+        for (int kk = -2; kk < so+2; kk++) {
+            for (int jj = -2; jj < sn+2; jj++) {
+                for (int ii = -2; ii < sm+2; ii++) {
+                    int ind = index(ii, jj, kk);
+                    for(int ll=0; ll<extraps.n0[ind]; ll++){
+                        ref_map &ext_sf = extraps.f0[ind][ll];
+                        int oid = ext_sf.oid();
+                        if(oid<=0 || oid>mgmt->n_obj || !is_fixed_obj(oid)) continue;
+                        int oi = oid - 1;
+                        for(int d=0; d<3; d++) ext_sf.xpred[d] -= mean_shift[3*oi+d];
+                    }
+                }
+            }
+        }
+    }
+    
     int prob_co=0;
 	// apply corrector to all, including ghost regions (to get communicated extraps)
 	for (int kk=-2; kk<so+2; kk++) {
@@ -1274,11 +1356,15 @@ int fluid_3d::update_reference_map(const double cdt, bool verbose){
 			for (int ii = -2; ii < sm+2; ii++) {
 				int ind = index(ii,jj,kk);
 				ref_map &sf = rm0[ind];
+				if(is_fixed_obj(sf.oid())) sf.set_xpred(sf.x);
 				if(sf.oid()) sf.set_half_timestep();
 
 				// apply corrector to extrapolated fields as well
 				for(int ll=0;ll<extraps.n0[ind];ll++){
 					ref_map &ext_sf = extraps.f0[ind][ll];
+					if(is_fixed_obj(ext_sf.oid())) {
+                        ext_sf.set_xpred(ext_sf.x);
+                    }
 					int obj_id = ext_sf.oid();
 					bool found = false;
 					for( int mm =0;(mm<temp_extraps.n0[ind])&&!found;mm++){

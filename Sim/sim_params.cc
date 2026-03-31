@@ -41,7 +41,7 @@ sim_params::sim_params(const char *fn):
     dt_ex_pad(0.8), weight_fac(0.25),
     gravity(0),
     bct{{0,0,0,0,0,0},{0,0,0,0,0,0},{0,0,0,0,0,0}},bcv{{0,0,0,0,0,0},{0,0,0,0,0,0},{0,0,0,0,0,0}},
-    object_list(NULL),
+    object_list(NULL), object_is_fixed(NULL),
     srho(NULL), shear_mod(NULL),
     basic_specs(NULL), extra_specs(NULL)
     {
@@ -218,12 +218,14 @@ sim_params::sim_params(const char *fn):
             n_obj = final_int(ln);
             if(n_obj>0 && object_list==NULL){
                 object_list = new int[n_obj];
+                object_is_fixed = new int[n_obj];
                 basic_specs = new double[n_obj*n_basic_specs];
 				extra_specs = new double[n_obj*n_extra_specs];
                 srho = new double[n_obj];
                 shear_mod = new double[n_obj];
                 for(i=0;i<n_obj;i++) {
                     object_list[i] = 0;
+                    object_is_fixed[i] = 0;
                     srho[i] = 1.; shear_mod[i] = 1.;
                     extra_specs[n_extra_specs*i] = 1.;
                     for(int j=1;j<n_extra_specs;j++) extra_specs[n_extra_specs*i+j] = 0.;
@@ -342,6 +344,12 @@ sim_params::sim_params(const char *fn):
             int index = next_int(ln);
             if(index < n_obj){
                 object_list[index] = final_int(ln);
+            }
+             } else if(se(bp, "object_is_fixed")){
+            if(object_is_fixed==NULL) printf("sim_params:: warning: object_is_fixed is not allocated but you attempted to access it!\n");
+            int index = next_int(ln);
+            if(index < n_obj){
+                object_is_fixed[index] = final_int(ln);
             }
         } else if(se(bp, "extra_specs")){
 			if(extra_specs==NULL) printf("sim_params:: warning: extra_specs is not allocated but you attempted to access it!\n");
@@ -526,6 +534,7 @@ void sim_params::print_params(){
            "            wt_n                      (2.5)                    double\n"
            "            srho                      (ind, sr)                double\n"
            "            shear_mod                 (ind, sm)                double\n"
+            "            object_is_fixed           (ind, 0/1)               int\n"
            "            ex_visc_mult              (1.)                     double\n"
            "            ev_trans_mult             (1.)                     double\n"
            "            sdt_pad                   (0.25)                   double\n"
@@ -625,6 +634,11 @@ void sim_params::write_params(const char * chk_dirname){
                             fprintf(fh, "basic_specs               %d ", i);
 							for(int j=0;j<n_basic_specs;j++) fprintf(fh, "%g ", basic_specs[n_basic_specs*i+j]);
 							fprintf(fh, "\n");
+                        }
+                    }
+                     if(object_is_fixed!=NULL){
+                        for(int i=0;i<n_obj;i++){
+                            fprintf(fh, "object_is_fixed           %d %d\n", i, object_is_fixed[i]);
                         }
                     }
                     if(extra_specs!=NULL){

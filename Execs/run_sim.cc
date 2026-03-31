@@ -76,6 +76,10 @@ int main(int argc, char* argv[]) {
     if(rank==0) mkdir(spars.dirname,S_IRWXU|S_IRWXG|S_IROTH|S_IXOTH);
 
 	if (rank == 0) {
+	 int fixed_objs = 0;
+        for(int i=0;i<spars.n_obj;i++) {
+            if(spars.object_is_fixed!=NULL && spars.object_is_fixed[i]!=0) fixed_objs++;
+        }
 		printf("\n#**************** %2d procs *****************\n"
 			"# Simulation type: %s\n"
 			"# initialized using %d x %d x %d decomposition\n"
@@ -95,6 +99,7 @@ int main(int argc, char* argv[]) {
             spars.x_prd,spars.y_prd,spars.z_prd,
             spars.dirname);
         printf("# Simulating %d objects\n", spars.n_obj);
+         printf("# Fixed objects by cfg switch: %d\n", fixed_objs);
         for(int i=0;i<spars.n_obj;i++) mgmt->objs[i]->print_self();
     }
 
@@ -144,6 +149,11 @@ f3d.init_iter(init_err);
         if(rank==0) {
             printf("# HIT cold-start: particle insertion done, forcing after insert = %s\n",
                    spars.hit_keep_forcing_after_insert?"ON":"OFF");
+                    if(spars.object_is_fixed!=NULL) {
+                int fixed_objs = 0;
+                for(int i=0;i<configured_n_obj;i++) if(spars.object_is_fixed[i]!=0) fixed_objs++;
+                printf("# HIT cold-start: fixed object switches active for %d objects during pre-iterations.\n", fixed_objs);
+            }
         }
 
         const int pre_steps = (spars.hit_pre_iter_steps>0)?spars.hit_pre_iter_steps:0;
