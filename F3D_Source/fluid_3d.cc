@@ -1292,22 +1292,12 @@ const int *obj_fix = spars->object_is_fixed;
             }
         }
 
-        // extrapolated entries
-        for (int kk = -2; kk < so+2; kk++) {
-            for (int jj = -2; jj < sn+2; jj++) {
-                for (int ii = -2; ii < sm+2; ii++) {
-                    int ind = index(ii, jj, kk);
-                    for(int ll=0; ll<extraps.n0[ind]; ll++){
-                        ref_map &ext_sf = extraps.f0[ind][ll];
-                        int oid = ext_sf.oid();
-                        if(oid<=0 || oid>mgmt->n_obj || !is_fixed_obj(oid)) continue;
-                        int oi = oid - 1;
-                        for(int d=0; d<3; d++) local_sum[3*oi+d] += (ext_sf.xpred[d] - ext_sf.x[d]);
-                        local_cnt[oi] += 1.0;
-                    }
-                }
-            }
-        }
+         // NOTE:
+        // We intentionally estimate mean rigid translation using only primary
+        // solid entries (rm0 with oid>0), not extrapolated layers.
+        // Extrapolated entries can vary strongly over time and can bias the
+        // object-wise mean increment, which accumulates as artificial drift
+        // for "fixed" objects.
 
         MPI_Allreduce(local_sum.data(), global_sum.data(), static_cast<int>(global_sum.size()), MPI_DOUBLE, MPI_SUM, grid->cart);
         MPI_Allreduce(local_cnt.data(), global_cnt.data(), mgmt->n_obj, MPI_DOUBLE, MPI_SUM, grid->cart);
@@ -1356,15 +1346,11 @@ const int *obj_fix = spars->object_is_fixed;
 			for (int ii = -2; ii < sm+2; ii++) {
 				int ind = index(ii,jj,kk);
 				ref_map &sf = rm0[ind];
-				if(is_fixed_obj(sf.oid())) sf.set_xpred(sf.x);
 				if(sf.oid()) sf.set_half_timestep();
 
 				// apply corrector to extrapolated fields as well
 				for(int ll=0;ll<extraps.n0[ind];ll++){
 					ref_map &ext_sf = extraps.f0[ind][ll];
-					if(is_fixed_obj(ext_sf.oid())) {
-                        ext_sf.set_xpred(ext_sf.x);
-                    }
 					int obj_id = ext_sf.oid();
 					bool found = false;
 					for( int mm =0;(mm<temp_extraps.n0[ind])&&!found;mm++){
