@@ -63,6 +63,7 @@ class sim_params{
 	// fourth bit => write checkpoint files for every frame
     // fifth bit => write diagnostic file, turn on DEBUG macro to work
     // sixth bit => write macro.dat
+    // seventh bit => write 3D velocity/exchange fields
 	unsigned int dump_code;
 	// number of tracers to use
 	int ntracers;

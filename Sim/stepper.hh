@@ -65,6 +65,7 @@ class stepper {
 	// 8 == check point files
 	// 16 == diagnostics
 	// 32 == macro info
+	// 64 == 3D velocity/exchange fields
 	const unsigned int dump_code;
 	double T;
 	/** step time */
@@ -597,6 +598,11 @@ void stepper::write_files(p_class &pr, const int  snum, const int fnum) {
 	for(unsigned int i=0;i<wparams.size();i++) {
 		sprintf(fname_buf,"%s/%s.%05d",dir,wparams[i].filename,fnum);
 		pr.write_slice(wparams[i],fname_buf);
+	}
+
+	// Write full 3D velocity and energy-exchange fields if specified
+	if(dump_code&64) {
+		pr.write_3d_exchange_fields(dir,fnum);
 	}
 
 	// Write checkpoint files if specified

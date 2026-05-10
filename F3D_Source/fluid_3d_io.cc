@@ -1062,3 +1062,224 @@ const char fluid_3d::tri_poly[2460]={
 	3,9,11,1,2,9,2,11,9,0,2,11,8,0,11,3,2,11,2,3,8,2,8,10,10,8,9,9,10,2,
 	0,9,2,2,3,8,2,8,10,0,1,8,1,10,8,1,10,2,1,3,8,9,1,8,0,9,1,0,3,8
 };
+
+/** Writes per-frame 3D fields used for energy-exchange post-processing.
+ *
+ * The files are native-endian binary files with this layout:
+ *   8 bytes:  ASCII magic string "RMT3D3D\0"
+ *   3 int32:  global dimensions m, n, o
+ *   m*n*o float32 values, with x-index varying fastest.
+ *
+ * Field names:
+ *   vx3d, vy3d, vz3d: velocity components
+ *   ppf3d: passive elastic/deformation power density, computed as
+ *          -sigma_elastic : grad(u), averaged over valid lower faces
+ *   ppe3d: carrier-fluid viscous dissipation density 2*mu*S:S, where
+ *          S = 0.5*(grad(u)+grad(u)^T); primary solid cells are zeroed
+ */
+void fluid_3d::write_3d_exchange_fields(const char* dirname, const int frame_num) {
+    const char* names[5] = {"vx3d", "vy3d", "vz3d", "ppf3d", "ppe3d"};
+    char filename[512];
+
+    for(int f=0; f<5; f++) {
+        sprintf(filename, "%s/%s.%05d", dirname, names[f], frame_num);
+        write_scalar_3d_binary(filename, f);
+    }
+}
+
+void fluid_3d::write_scalar_3d_binary(const char* filename, int field_type) {
+    const int local_len = sm*sn*so;
+    std::vector<float> local(local_len);
+
+    int lp = 0;
+    for(int k=0; k<so; k++) for(int j=0; j<sn; j++) for(int i=0; i<sm; i++, lp++) {
+        const int eid = index(i,j,k);
+        local[lp] = static_cast<float>(output_field_3d_value(field_type, eid));
+    }
+
+    const int TAG_INFO = 6001;
+    const int TAG_DATA = 6002;
+    if(rank==0) {
+        const size_t global_len = static_cast<size_t>(m)*static_cast<size_t>(n)*static_cast<size_t>(o);
+        std::vector<float> global(global_len, 0.f);
+
+        int info[6] = {ai, aj, ak, sm, sn, so};
+        for(int kk=0; kk<info[5]; kk++) for(int jj=0; jj<info[4]; jj++) for(int ii=0; ii<info[3]; ii++) {
+            const size_t lidx = static_cast<size_t>(ii) + static_cast<size_t>(info[3])*(static_cast<size_t>(jj) + static_cast<size_t>(info[4])*static_cast<size_t>(kk));
+            const size_t gidx = static_cast<size_t>(info[0]+ii) + static_cast<size_t>(m)*(static_cast<size_t>(info[1]+jj) + static_cast<size_t>(n)*static_cast<size_t>(info[2]+kk));
+            global[gidx] = local[lidx];
+        }
+
+        for(int sender=1; sender<grid->procs; sender++) {
+            MPI_Recv(info, 6, MPI_INT, sender, TAG_INFO, grid->cart, MPI_STATUS_IGNORE);
+            const int recv_len = info[3]*info[4]*info[5];
+            std::vector<float> recv_buf(recv_len);
+            if(recv_len>0) MPI_Recv(&recv_buf[0], recv_len, MPI_FLOAT, sender, TAG_DATA, grid->cart, MPI_STATUS_IGNORE);
+
+            for(int kk=0; kk<info[5]; kk++) for(int jj=0; jj<info[4]; jj++) for(int ii=0; ii<info[3]; ii++) {
+                const size_t lidx = static_cast<size_t>(ii) + static_cast<size_t>(info[3])*(static_cast<size_t>(jj) + static_cast<size_t>(info[4])*static_cast<size_t>(kk));
+                const size_t gidx = static_cast<size_t>(info[0]+ii) + static_cast<size_t>(m)*(static_cast<size_t>(info[1]+jj) + static_cast<size_t>(n)*static_cast<size_t>(info[2]+kk));
+                global[gidx] = recv_buf[lidx];
+            }
+        }
+
+        FILE *fh = p_safe_fopen(filename, "wb");
+        const char magic[8] = {'R','M','T','3','D','3','D','\0'};
+        const int dims[3] = {m, n, o};
+        fwrite(magic, sizeof(char), 8, fh);
+        fwrite(dims, sizeof(int), 3, fh);
+        if(global_len>0) fwrite(&global[0], sizeof(float), global_len, fh);
+        fclose(fh);
+    } else {
+        int info[6] = {ai, aj, ak, sm, sn, so};
+        MPI_Send(info, 6, MPI_INT, 0, TAG_INFO, grid->cart);
+        if(local_len>0) MPI_Send(&local[0], local_len, MPI_FLOAT, 0, TAG_DATA, grid->cart);
+    }
+
+    MPI_Barrier(grid->cart);
+}
+
+double fluid_3d::output_field_3d_value(int field_type,int eid) {
+    switch(field_type) {
+        case 0: return u0[eid].vel[0];
+        case 1: return u0[eid].vel[1];
+        case 2: return u0[eid].vel[2];
+        case 3: return ppf_cell_value(eid);
+        case 4: return ppe_cell_value(eid);
+        default: return 0.;
+    }
+}
+
+double fluid_3d::ppe_cell_value(int eid) {
+    if(rm0[eid].oid()>0) return 0.;
+
+    const int strides[3] = {1, sm4, smn4};
+    const double invh[3] = {dxsp, dysp, dzsp};
+    double grad[3][3];
+
+    for(int r=0; r<3; r++) {
+        const int step = strides[r];
+        for(int c=0; c<3; c++) {
+            grad[r][c] = 0.5*invh[r]*(u0[eid+step].vel[c] - u0[eid-step].vel[c]);
+        }
+    }
+
+    double s2 = 0.;
+    for(int i=0; i<3; i++) for(int j=0; j<3; j++) {
+        const double sij = 0.5*(grad[i][j] + grad[j][i]);
+        s2 += sij*sij;
+    }
+
+    return 2.*mgmt->fm.mu*s2;
+}
+
+double fluid_3d::ppf_cell_value(int eid) {
+    ref_map &rf = rm0[eid];
+    if(rf.oid()==0) return 0.;
+
+    double sum = 0.;
+    int count = 0;
+    const lower_faces faces[3] = {LEFT, FRONT, DOWN};
+    for(int f=0; f<3; f++) {
+        double val = 0.;
+        if(ppf_face_value(faces[f], eid, rf, val)) {
+            sum += val;
+            count++;
+        }
+    }
+
+    return count>0 ? sum/static_cast<double>(count) : 0.;
+}
+
+bool fluid_3d::ppf_face_value(lower_faces F,int eid,ref_map &rf,double &value) {
+    if(F>2) p_fatal_error("ppf_face_value: Unknown lower_faces, try again.\n", 1);
+    value = 0.;
+
+    const int obj_id = rf.oid();
+    if(obj_id==0) return false;
+
+    const int strides[3] = {1, sm4, smn4};
+    const double facs[3] = {dxsp, dysp, dzsp};
+    const int strd = strides[F];
+    const int ad1 = (F+1)%3, ad2 = (F+2)%3;
+    const int as1 = strides[ad1], as2 = strides[ad2];
+
+    const int ind = G0 + eid;
+    int locpos[3] = {0,0,0};
+    unpack_index(ind, locpos[0], locpos[1], locpos[2]);
+
+    int ngbrpos[3] = {locpos[0], locpos[1], locpos[2]};
+    ngbrpos[F] -= 1;
+    ref_map *rn = get_refmap(ind-strd, obj_id, ngbrpos);
+    if(rn==NULL) return false;
+
+    const double phiv = 0.5*(rf.phi(mgmt) + rn->phi(mgmt));
+    if(phiv > mgmt->eps) return false;
+
+    const double tf = mgmt->heaviside(phiv);
+    sl_mat &tmp_sm = mgmt->sm_array[obj_id-1];
+    const double G = tmp_sm.G * tf;
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad1] += 1;
+    ref_map *r1p = get_refmap(ind+as1, obj_id, ngbrpos);
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad1] += 1;
+    ngbrpos[F] -= 1;
+    ref_map *r1p1 = get_refmap(ind+as1-strd, obj_id, ngbrpos);
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad1] -= 1;
+    ref_map *r1m = get_refmap(ind-as1, obj_id, ngbrpos);
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad1] -= 1;
+    ngbrpos[F] -= 1;
+    ref_map *r1m1 = get_refmap(ind-as1-strd, obj_id, ngbrpos);
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad2] += 1;
+    ref_map *r2p = get_refmap(ind+as2, obj_id, ngbrpos);
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad2] += 1;
+    ngbrpos[F] -= 1;
+    ref_map *r2p1 = get_refmap(ind+as2-strd, obj_id, ngbrpos);
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad2] -= 1;
+    ref_map *r2m = get_refmap(ind-as2, obj_id, ngbrpos);
+
+    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
+    ngbrpos[ad2] -= 1;
+    ngbrpos[F] -= 1;
+    ref_map *r2m1 = get_refmap(ind-as2-strd, obj_id, ngbrpos);
+
+    if(check_null(r1p, r1p1, r1m, r1m1, r2p, r2p1, r2m, r2m1)) return false;
+
+    double dR[3][3];
+    for(int nn=0; nn<3; nn++) {
+        dR[F][nn] = facs[F]*(rf.x[nn] - rn->x[nn]);
+        dR[ad1][nn] = 0.25*facs[ad1]*(r1p->x[nn] + r1p1->x[nn] - r1m->x[nn] - r1m1->x[nn]);
+        dR[ad2][nn] = 0.25*facs[ad2]*(r2p->x[nn] + r2p1->x[nn] - r2m->x[nn] - r2m1->x[nn]);
+    }
+
+    matrix grad_xi(0);
+    grad_xi.initialize(dR[0][0], dR[1][0], dR[2][0],
+                       dR[0][1], dR[1][1], dR[2][1],
+                       dR[0][2], dR[1][2], dR[2][2]);
+    matrix def_grad = grad_xi.inverse();
+
+    sym_matrix sigma(0);
+    sigma = def_grad.aat();
+    const double sigma_avg = sigma.trace()/3.0;
+    for(int nn=0; nn<3; nn++) sigma(nn,nn) -= sigma_avg;
+    sigma.scale(G);
+
+    matrix gv;
+    velocity_grad(F, eid, gv);
+
+    for(int r=0; r<3; r++) for(int c=0; c<3; c++) value -= sigma(r,c)*gv(r,c);
+    return true;
+}

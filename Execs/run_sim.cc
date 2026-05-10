@@ -199,6 +199,7 @@ f3d.init_iter(init_err);
                 if(spars.dump_code & 8) { puts("# Output checkpoint files."); }
                 if(spars.dump_code & 16) { puts("# Output diagonastics file."); }
                 if(spars.dump_code & 32) { puts("# Output macro stats file."); }
+                if(spars.dump_code & 64) { puts("# Output 3D velocity/exchange fields."); }
 
         }
 	}

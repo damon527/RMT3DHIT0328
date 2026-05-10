@@ -401,6 +401,7 @@ class fluid_3d {
 	void display_stats();
 	void copy_slice_from_buf(int **sender_list,int co,double *g_val);
 	void write_slice(write_params params,const char* filename);
+	void write_3d_exchange_fields(const char* dirname, const int frame_num);
 	void write_chk_pt(const int step_num, const int chk_num, const char* filename);
 	void copy_chk_slice_to_buf(double *g_val, double *comm_buf, int *info);
 	void copy_chk_to_field(write_params wp);
@@ -410,6 +411,11 @@ class fluid_3d {
 	void save_matrix(FILE *fh,double *u_global,int d1,int d2);
 	void save_text(FILE *fh,double *u_global,int d1,int d2,double *a1,double *a2);
 	void save_gnuplot(FILE *fh,double *u_global,int d1,int d2,double *a1,double *a2);
+	double output_field_3d_value(int field_type,int eid);
+	double ppf_cell_value(int eid);
+	bool ppf_face_value(lower_faces F,int eid,ref_map &rf,double &value);
+	double ppe_cell_value(int eid);
+	void write_scalar_3d_binary(const char* filename,int field_type);
 	int min_phi_id(int eid);
 	double min_phi(int eid);
 	double phi(int eid,int cnum);

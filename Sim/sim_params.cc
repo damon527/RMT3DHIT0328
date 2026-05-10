@@ -508,7 +508,7 @@ void sim_params::print_params(){
            "            out_flag                  (135)                    int\n"
            "            output_dim                0/1/2(2)                 int\n"
            "            output_ind                (48)                     int\n"
-           "            dump_code                 (3)                      unsigned int\n"
+            "            dump_code                 (3)                      unsigned int (add 64 for vx3d/vy3d/vz3d/ppf3d/ppe3d)\n"
            "            ntracers                  (1000)                   int\n"
            "            dt                        (1.)                     double\n"
            "            T                         (1.)                     double\n"
