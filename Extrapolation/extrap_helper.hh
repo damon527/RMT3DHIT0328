@@ -220,7 +220,10 @@ class extrap_helper{
 			nmask=1;
 			for(int i=0;i<smno4;i++) mask[i]=0;
 		}
-		// let cur_mask (mask in the primary object) be set by current nmask
+				// Start each object on a fresh mask value. Otherwise stale layer
+		// masks from the previously extrapolated object can equal cur_mask
+		// and be mistaken for primary cells of the new object.
+		increase_nmask();
 		cur_mask = nmask;
         primary_num=0;
         watch.toc(2);
@@ -345,7 +348,7 @@ class extrap_helper{
                 } else if(k<2) {
                     if(neigh[8]>=0) within=false;
                 } else {
-                    if(neigh[26]>0) within=false;
+                    if(neigh[26]>=0) within=false;
                 }
             } else {
                 if(k<2) {

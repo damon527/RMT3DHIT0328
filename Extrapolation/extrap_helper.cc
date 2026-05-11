@@ -37,7 +37,10 @@ bool extrap_helper<N>::least_square(bool v){
 	double *dp = data; //the position data, length per index controlled by capacity
 	double *wdp = weight_data; // the weight for each data point at this index
 	double *rp = rval; //the reference map values for
-    if(capacity == 0) return false;
+    if(capacity == 0) {
+        watch.toc(1);
+        return false;
+    }
 
     //first compute the averages of each component
     double det;
@@ -57,7 +60,11 @@ bool extrap_helper<N>::least_square(bool v){
         wdp++;
     }
 
-    // divide out the weighted number of elements
+ // divide out the weighted number of elements
+      if(wt_capacity <= 0. || !std::isfinite(wt_capacity)) {
+        watch.toc(1);
+        return false;
+    }
     for(int k=0;k<N;k++) rval_avg[k] /= wt_capacity;
     for(int k=0;k<D;k++) data_avg[k] /= wt_capacity;
     // now gather the matrix entires
@@ -79,18 +86,34 @@ bool extrap_helper<N>::least_square(bool v){
     mat3 A(a[XX], a[XY], a[XZ], a[XY], a[YY], a[YZ], a[XZ], a[YZ], a[ZZ]);
     mat3 Ainv = A.inverse(det);
 
-    if(fabs(det)<1e-17) {
-        //printf("Extrap_helper: Oops. Determinant %g\n", det);
-        //A.print();
-        //puts("");
-        //Ainv.print();
-        return false;
+     // The 3D affine fit can be singular or badly conditioned when the
+    // available lower-layer data lie on a line/plane, which is common near
+    // boundaries and thin first-layer stencils. Falling back to a constant
+    // weighted-average extrapolation is safer than aborting or amplifying
+    // roundoff through a nearly singular inverse.
+    double scale = 0.;
+    for(int k=0;k<nmat;k++) {
+        double mag = fabs(a[k]);
+        if(mag > scale) scale = mag;
+    }
+    const double rel_det_tol = 1.e-12;
+    if(!std::isfinite(det) || scale <= 0. || fabs(det) < rel_det_tol*scale*scale*scale) {
+        for(int k=0;k<rlen;k++) coeff[k]=0.;
+        watch.toc(1);
+        return true;
     }
 #if 0
     if(v) printf("rhs %g %g %g\n", rhs[0], rhs[1], rhs[2]);
 #endif
 
     dot(Ainv, rhs); // rhs now stores the coefficients
+    for(int k=0;k<rlen;k++) {
+        if(!std::isfinite(rhs[k])) {
+            for(int kk=0;kk<rlen;kk++) coeff[kk]=0.;
+            watch.toc(1);
+            return true;
+        }
+    }
     pack_coeff(rhs); // write coefficients to storage
     // now store the avg data and reference map values
     // for safety, we should check that cp[i] is at least 1, so there's enough room to store

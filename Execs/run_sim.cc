@@ -166,6 +166,14 @@ f3d.init_iter(init_err);
         spars.chk_step = 0;
         spars.chk_num = 0;
         spars.set_current_time(0);
+        
+        
+        // Future checkpoints are production restart points, not HIT
+        // cold-start background checkpoints.  Persist the post-insertion
+        // forcing state as well so recover.cfg restarts with the same
+        // turbulence forcing setting used during production.
+        spars.hit_cold_start_enable = false;
+        spars.turb_iso_enable = spars.hit_keep_forcing_after_insert;
     }
 
 	stepper sim(spars,f3d);
