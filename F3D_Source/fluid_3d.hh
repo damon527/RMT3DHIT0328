@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <unistd.h>
 #ifdef _OPENMP
 #include "omp.h"
@@ -154,6 +155,10 @@ class fluid_3d {
 	field *u_mem;
     /** pointer to the first non-ghost fluid node */
     field *u0;
+    /** cached actual particle-feedback acceleration used in the momentum RHS */
+    double *fp_rhs_total_mem;
+    /** pointer to first non-ghost cached particle-feedback acceleration */
+    double *fp_rhs_total0;
 
 #if defined(VAR_DEN)
     /** density */
@@ -412,10 +417,21 @@ class fluid_3d {
 	void save_text(FILE *fh,double *u_global,int d1,int d2,double *a1,double *a2);
 	void save_gnuplot(FILE *fh,double *u_global,int d1,int d2,double *a1,double *a2);
 	double output_field_3d_value(int field_type,int eid);
+	double chi_f_cell_value(int eid);
+	double chi_p_cell_value(int eid);
+	double strain_s2_cell_value(int eid);
+	double centered_strain_s2_cell_value(int eid);
+	void fp_total_cell_value(int eid,double (&fp)[3]);
+	void fp_stressdiv_cell_value(int eid,double (&fp)[3]);
+	void pure_fluid_stress_divergence(int eid,double (&acc)[3]);
 	double ppf_cell_value(int eid);
-	bool ppf_face_value(lower_faces F,int eid,ref_map &rf,double &value);
+	double ppf_full_cell_value(int eid);
 	double ppe_cell_value(int eid);
 	void write_scalar_3d_binary(const char* filename,int field_type);
+	void write_3d_metadata(const char* dirname,const int frame_num);
+	void write_frame_diagnostics(const char* dirname,const int frame_num);
+	void compute_frame_ubar(double (&ubar_full)[3],double (&ubar_fluid)[3]);
+	void clear_fp_rhs_total();
 	int min_phi_id(int eid);
 	double min_phi(int eid);
 	double phi(int eid,int cnum);

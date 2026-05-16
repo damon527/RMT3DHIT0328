@@ -1063,28 +1063,107 @@ const char fluid_3d::tri_poly[2460]={
 	0,9,2,2,3,8,2,8,10,0,1,8,1,10,8,1,10,2,1,3,8,9,1,8,0,9,1,0,3,8
 };
 
-/** Writes per-frame 3D fields used for energy-exchange post-processing.
+
+/** Writes per-frame 3D fields used for budget and spectral energy-exchange post-processing.
  *
  * The files are native-endian binary files with this layout:
  *   8 bytes:  ASCII magic string "RMT3D3D\0"
  *   3 int32:  global dimensions m, n, o
  *   m*n*o float32 values, with x-index varying fastest.
  *
- * Field names:
- *   vx3d, vy3d, vz3d: velocity components
- *   ppf3d: passive elastic/deformation power density, computed as
- *          -sigma_elastic : grad(u), averaged over valid lower faces
- *   ppe3d: carrier-fluid viscous dissipation density 2*mu*S:S, where
- *          S = 0.5*(grad(u)+grad(u)^T); primary solid cells are zeroed
+ * The legacy ppe3d/ppf3d definitions are intentionally replaced here:
+ *   ppe3d = 2*nu*chi_f*S'_{ij}S'_{ij}
+ *   ppf3d = chi_f*u'_fluid_i*fp_total_i, where fp_total is the particle
+ *           feedback acceleration cached from the actual momentum RHS during
+ *           the velocity update; ppf3d_full is the full-domain counterpart.
+ *
+ * HDF5-style dataset definitions and attributes for these native binary files
+ * are written to frame_fields.<frame>.meta so downstream converters can create
+ * the requested /fields, /diagnostics, and /particles HDF5 hierarchy without
+ * ambiguity.
  */
+namespace {
+    double g_frame_ubar_full[3] = {0.,0.,0.};
+    double g_frame_ubar_fluid[3] = {0.,0.,0.};
+    const char *g_deriv_op = "solver-consistent face-normal velocity gradients averaged to cell centers (same face-difference convention as fluid_stress); fp_total is cached from momentum RHS";
+
+    void write_attr(FILE *fh,const char *path,const char *key,const char *value) {
+        fprintf(fh, "attr %s %s = %s\n", path, key, value);
+    }
+
+    void write_scalar_attr(FILE *fh,const char *path,const char *definition,const char *units,
+                           const char *sign,const fluid_3d *f3d,int frame_num) {
+        write_attr(fh,path,"units",units);
+        write_attr(fh,path,"definition",definition);
+        write_attr(fh,path,"sign_convention",sign);
+        write_attr(fh,path,"normalization","pointwise value on the solver cell-centered grid; global means are arithmetic spatial means");
+        write_attr(fh,path,"mask_used","see definition");
+        write_attr(fh,path,"derivative_operator",g_deriv_op);
+        fprintf(fh,"attr %s density_used = %.17g\n", path, f3d->mgmt->fm.rho);
+        fprintf(fh,"attr %s viscosity_used = %.17g\n", path, f3d->mgmt->fm.mu/f3d->mgmt->fm.rho);
+        fprintf(fh,"attr %s time = %.17g\n", path, f3d->time);
+        fprintf(fh,"attr %s timestep = %d\n", path, f3d->nt);
+        fprintf(fh,"attr %s frame_index = %d\n", path, frame_num);
+    }
+}
+
+void fluid_3d::compute_frame_ubar(double (&ubar_full)[3],double (&ubar_fluid)[3]) {
+    double local_full[3] = {0.,0.,0.};
+    double local_fluid[4] = {0.,0.,0.,0.};
+    for(int k=0;k<so;k++) for(int j=0;j<sn;j++) for(int i=0;i<sm;i++) {
+        const int eid = index(i,j,k);
+        field &f = u0[eid];
+        const double chi_f = chi_f_cell_value(eid);
+        for(int c=0;c<3;c++) {
+            local_full[c] += f.vel[c];
+            local_fluid[c] += chi_f*f.vel[c];
+        }
+        local_fluid[3] += chi_f;
+    }
+    double global_full[3] = {0.,0.,0.};
+    double global_fluid[4] = {0.,0.,0.,0.};
+    MPI_Allreduce(local_full, global_full, 3, MPI_DOUBLE, MPI_SUM, world);
+    MPI_Allreduce(local_fluid, global_fluid, 4, MPI_DOUBLE, MPI_SUM, world);
+    const double denom = static_cast<double>(m)*static_cast<double>(n)*static_cast<double>(o);
+    for(int c=0;c<3;c++) {
+        ubar_full[c] = global_full[c]/denom;
+        ubar_fluid[c] = global_fluid[c]/std::max(global_fluid[3], 1.e-30);
+    }
+}
+
 void fluid_3d::write_3d_exchange_fields(const char* dirname, const int frame_num) {
-    const char* names[5] = {"vx3d", "vy3d", "vz3d", "ppf3d", "ppe3d"};
+    compute_frame_ubar(g_frame_ubar_full, g_frame_ubar_fluid);
+    compute_stress(false);
+
+    const char* names[] = {
+        "u_x", "u_y", "u_z",
+        "vx3d", "vy3d", "vz3d",
+        "chi_f", "chi_p",
+        "ppe3d", "eps_all_3d", "ppf3d", "ppf3d_full",
+        "fp_total_x", "fp_total_y", "fp_total_z",
+        "fp_stressdiv_x", "fp_stressdiv_y", "fp_stressdiv_z",
+        "sigma_total_xx", "sigma_total_xy", "sigma_total_xz", "sigma_total_yy", "sigma_total_yz", "sigma_total_zz",
+        "ppe_centered_debug"
+    };
+    const int field_ids[] = {
+        0, 1, 2,
+        0, 1, 2,
+        3, 4,
+        5, 6, 7, 8,
+        9, 10, 11,
+        12, 13, 14,
+        15, 16, 17, 18, 19, 20,
+        21
+    };
+    const int nfields = sizeof(names)/sizeof(names[0]);
     char filename[512];
 
-    for(int f=0; f<5; f++) {
+    for(int f=0; f<nfields; f++) {
         sprintf(filename, "%s/%s.%05d", dirname, names[f], frame_num);
-        write_scalar_3d_binary(filename, f);
+        write_scalar_3d_binary(filename, field_ids[f]);
     }
+    write_frame_diagnostics(dirname, frame_num);
+    write_3d_metadata(dirname, frame_num);
 }
 
 void fluid_3d::write_scalar_3d_binary(const char* filename, int field_type) {
@@ -1140,27 +1219,56 @@ void fluid_3d::write_scalar_3d_binary(const char* filename, int field_type) {
 }
 
 double fluid_3d::output_field_3d_value(int field_type,int eid) {
+    double fp[3] = {0.,0.,0.};
     switch(field_type) {
         case 0: return u0[eid].vel[0];
         case 1: return u0[eid].vel[1];
         case 2: return u0[eid].vel[2];
-        case 3: return ppf_cell_value(eid);
-        case 4: return ppe_cell_value(eid);
+        case 3: return chi_f_cell_value(eid);
+        case 4: return chi_p_cell_value(eid);
+        case 5: return ppe_cell_value(eid);
+        case 6: return 2.*(mgmt->fm.mu/mgmt->fm.rho)*strain_s2_cell_value(eid);
+        case 7: return ppf_cell_value(eid);
+        case 8: return ppf_full_cell_value(eid);
+        case 9: fp_total_cell_value(eid, fp); return fp[0];
+        case 10: fp_total_cell_value(eid, fp); return fp[1];
+        case 11: fp_total_cell_value(eid, fp); return fp[2];
+        case 12: fp_stressdiv_cell_value(eid, fp); return fp[0];
+        case 13: fp_stressdiv_cell_value(eid, fp); return fp[1];
+        case 14: fp_stressdiv_cell_value(eid, fp); return fp[2];
+        case 15: return 0.5*(u0[eid].sigma[0][0] + u0[eid+1].sigma[0][0]);
+        case 16: return 0.25*(u0[eid].sigma[0][1] + u0[eid+1].sigma[0][1] + u0[eid].sigma[1][0] + u0[eid+sm4].sigma[1][0]);
+        case 17: return 0.25*(u0[eid].sigma[0][2] + u0[eid+1].sigma[0][2] + u0[eid].sigma[2][0] + u0[eid+smn4].sigma[2][0]);
+        case 18: return 0.5*(u0[eid].sigma[1][1] + u0[eid+sm4].sigma[1][1]);
+        case 19: return 0.25*(u0[eid].sigma[1][2] + u0[eid+sm4].sigma[1][2] + u0[eid].sigma[2][1] + u0[eid+smn4].sigma[2][1]);
+        case 20: return 0.5*(u0[eid].sigma[2][2] + u0[eid+smn4].sigma[2][2]);
+        case 21: return 2.*(mgmt->fm.mu/mgmt->fm.rho)*chi_f_cell_value(eid)*centered_strain_s2_cell_value(eid);
         default: return 0.;
     }
 }
 
-double fluid_3d::ppe_cell_value(int eid) {
-    if(rm0[eid].oid()>0) return 0.;
+double fluid_3d::chi_p_cell_value(int eid) {
+    return (min_phi(eid) <= 0.) ? 1. : 0.;
+}
 
+double fluid_3d::chi_f_cell_value(int eid) {
+    return 1. - chi_p_cell_value(eid);
+}
+
+double fluid_3d::strain_s2_cell_value(int eid) {
     const int strides[3] = {1, sm4, smn4};
     const double invh[3] = {dxsp, dysp, dzsp};
     double grad[3][3];
 
+    // Solver-consistent gradient: reuse the face-normal difference convention
+    // used by fluid_stress(), then average lower/upper face gradients back to
+    // the cell center before forming the symmetric strain-rate tensor.
     for(int r=0; r<3; r++) {
         const int step = strides[r];
         for(int c=0; c<3; c++) {
-            grad[r][c] = 0.5*invh[r]*(u0[eid+step].vel[c] - u0[eid-step].vel[c]);
+            const double lower = invh[r]*(u0[eid].vel[c] - u0[eid-step].vel[c]);
+            const double upper = invh[r]*(u0[eid+step].vel[c] - u0[eid].vel[c]);
+            grad[r][c] = 0.5*(lower + upper);
         }
     }
 
@@ -1169,117 +1277,326 @@ double fluid_3d::ppe_cell_value(int eid) {
         const double sij = 0.5*(grad[i][j] + grad[j][i]);
         s2 += sij*sij;
     }
+    return s2;
+}
 
-    return 2.*mgmt->fm.mu*s2;
+double fluid_3d::centered_strain_s2_cell_value(int eid) {
+    const int strides[3] = {1, sm4, smn4};
+    const double invh[3] = {dxsp, dysp, dzsp};
+    double grad[3][3];
+    for(int r=0; r<3; r++) {
+        const int step = strides[r];
+        for(int c=0; c<3; c++) grad[r][c] = 0.5*invh[r]*(u0[eid+step].vel[c] - u0[eid-step].vel[c]);
+    }
+    double s2 = 0.;
+    for(int i=0; i<3; i++) for(int j=0; j<3; j++) {
+        const double sij = 0.5*(grad[i][j] + grad[j][i]);
+        s2 += sij*sij;
+    }
+    return s2;
+}
+
+void fluid_3d::fp_stressdiv_cell_value(int eid,double (&fp)[3]) {
+    const int strides[3] = {1, sm4, smn4};
+    const double invh[3] = {dxsp, dysp, dzsp};
+    for(int c=0;c<3;c++) fp[c] = 0.;
+
+    for(int face=0; face<3; face++) {
+        double lower_fluid[3] = {0.,0.,0.};
+        double upper_fluid[3] = {0.,0.,0.};
+        const int strd = strides[face];
+        for(int c=0;c<3;c++) {
+            lower_fluid[c] = mgmt->fm.mu * invh[face] * (u0[eid].vel[c] - u0[eid-strd].vel[c]);
+            upper_fluid[c] = mgmt->fm.mu * invh[face] * (u0[eid+strd].vel[c] - u0[eid].vel[c]);
+            const double lower_particle = u0[eid].sigma[face][c] - lower_fluid[c];
+            const double upper_particle = u0[eid+strd].sigma[face][c] - upper_fluid[c];
+            fp[c] += invh[face]*(upper_particle - lower_particle);
+        }
+    }
+#if defined(VAR_DEN)
+    const double rho = lrho[eid+G0];
+    if(rho!=0.) for(int c=0;c<3;c++) fp[c] /= rho;
+#endif
+}
+
+void fluid_3d::fp_total_cell_value(int eid,double (&fp)[3]) {
+    for(int c=0;c<3;c++) fp[c] = fp_rhs_total0[3*eid+c];
+}
+
+double fluid_3d::ppe_cell_value(int eid) {
+    return 2.*(mgmt->fm.mu/mgmt->fm.rho)*chi_f_cell_value(eid)*strain_s2_cell_value(eid);
 }
 
 double fluid_3d::ppf_cell_value(int eid) {
-    ref_map &rf = rm0[eid];
-    if(rf.oid()==0) return 0.;
-
-    double sum = 0.;
-    int count = 0;
-    const lower_faces faces[3] = {LEFT, FRONT, DOWN};
-    for(int f=0; f<3; f++) {
-        double val = 0.;
-        if(ppf_face_value(faces[f], eid, rf, val)) {
-            sum += val;
-            count++;
-        }
-    }
-
-    return count>0 ? sum/static_cast<double>(count) : 0.;
+    double fp[3] = {0.,0.,0.};
+    fp_total_cell_value(eid, fp);
+    double val = 0.;
+    for(int c=0;c<3;c++) val += (u0[eid].vel[c] - g_frame_ubar_fluid[c])*fp[c];
+    return chi_f_cell_value(eid)*val;
 }
 
-bool fluid_3d::ppf_face_value(lower_faces F,int eid,ref_map &rf,double &value) {
-    if(F>2) p_fatal_error("ppf_face_value: Unknown lower_faces, try again.\n", 1);
-    value = 0.;
+double fluid_3d::ppf_full_cell_value(int eid) {
+    double fp[3] = {0.,0.,0.};
+    fp_total_cell_value(eid, fp);
+    double val = 0.;
+    for(int c=0;c<3;c++) val += (u0[eid].vel[c] - g_frame_ubar_full[c])*fp[c];
+    return val;
+}
 
-    const int obj_id = rf.oid();
-    if(obj_id==0) return false;
+void fluid_3d::write_frame_diagnostics(const char* dirname,const int frame_num) {
+    const int pobj = mgmt->n_obj;
+    const int pnq = 12; // ppf total/abs/pos/neg, near eps/S2/ppf/abs/pos/neg/count/vol
+    const double dvol = dx*dy*dz;
+    const double small = 1.e-30;
+    const double alpha_near = 1.5, gap_g0 = 1.e-6, gap_pow = 1.;
 
-    const int strides[3] = {1, sm4, smn4};
-    const double facs[3] = {dxsp, dysp, dzsp};
-    const int strd = strides[F];
-    const int ad1 = (F+1)%3, ad2 = (F+2)%3;
-    const int as1 = strides[ad1], as2 = strides[ad2];
-
-    const int ind = G0 + eid;
-    int locpos[3] = {0,0,0};
-    unpack_index(ind, locpos[0], locpos[1], locpos[2]);
-
-    int ngbrpos[3] = {locpos[0], locpos[1], locpos[2]};
-    ngbrpos[F] -= 1;
-    ref_map *rn = get_refmap(ind-strd, obj_id, ngbrpos);
-    if(rn==NULL) return false;
-
-    const double phiv = 0.5*(rf.phi(mgmt) + rn->phi(mgmt));
-    if(phiv > mgmt->eps) return false;
-
-    const double tf = mgmt->heaviside(phiv);
-    sl_mat &tmp_sm = mgmt->sm_array[obj_id-1];
-    const double G = tmp_sm.G * tf;
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad1] += 1;
-    ref_map *r1p = get_refmap(ind+as1, obj_id, ngbrpos);
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad1] += 1;
-    ngbrpos[F] -= 1;
-    ref_map *r1p1 = get_refmap(ind+as1-strd, obj_id, ngbrpos);
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad1] -= 1;
-    ref_map *r1m = get_refmap(ind-as1, obj_id, ngbrpos);
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad1] -= 1;
-    ngbrpos[F] -= 1;
-    ref_map *r1m1 = get_refmap(ind-as1-strd, obj_id, ngbrpos);
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad2] += 1;
-    ref_map *r2p = get_refmap(ind+as2, obj_id, ngbrpos);
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad2] += 1;
-    ngbrpos[F] -= 1;
-    ref_map *r2p1 = get_refmap(ind+as2-strd, obj_id, ngbrpos);
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad2] -= 1;
-    ref_map *r2m = get_refmap(ind-as2, obj_id, ngbrpos);
-
-    for(int tmps=0; tmps<3; tmps++) ngbrpos[tmps] = locpos[tmps];
-    ngbrpos[ad2] -= 1;
-    ngbrpos[F] -= 1;
-    ref_map *r2m1 = get_refmap(ind-as2-strd, obj_id, ngbrpos);
-
-    if(check_null(r1p, r1p1, r1m, r1m1, r2p, r2p1, r2m, r2m1)) return false;
-
-    double dR[3][3];
-    for(int nn=0; nn<3; nn++) {
-        dR[F][nn] = facs[F]*(rf.x[nn] - rn->x[nn]);
-        dR[ad1][nn] = 0.25*facs[ad1]*(r1p->x[nn] + r1p1->x[nn] - r1m->x[nn] - r1m1->x[nn]);
-        dR[ad2][nn] = 0.25*facs[ad2]*(r2p->x[nn] + r2p1->x[nn] - r2m->x[nn] - r2m1->x[nn]);
+    // Build true connected-component clusters from near-neighbor graph. This is
+    // replicated on every rank because object centers are globally available.
+    std::vector<int> near_count(pobj, 0), parent(pobj, 0), cluster_id(pobj, 0), cluster_size(pobj, 1), state(pobj, 0);
+    std::vector<double> gap_weight_sum(pobj, 0.);
+    for(int i=0;i<pobj;i++) parent[i] = i;
+    auto find_root = [&](int a) -> int { while(parent[a]!=a){ parent[a]=parent[parent[a]]; a=parent[a]; } return a; };
+    auto unite = [&](int a,int b){ int ra=find_root(a), rb=find_root(b); if(ra!=rb) parent[rb]=ra; };
+    double I_gap_total = 0., near_pair_weight_sum = 0.;
+    int near_pair_count = 0;
+    for(int i=0;i<pobj;i++) for(int j=i+1;j<pobj;j++) {
+        object *oi = mgmt->objs[i], *oj = mgmt->objs[j];
+        double ddx = oi->c[0] - oj->c[0], ddy = oi->c[1] - oj->c[1], ddz = oi->c[2] - oj->c[2];
+        if(mgmt->x_prd) ddx -= mgmt->lx*floor(ddx/mgmt->lx + 0.5);
+        if(mgmt->y_prd) ddy -= mgmt->ly*floor(ddy/mgmt->ly + 0.5);
+        if(mgmt->z_prd) ddz -= mgmt->lz*floor(ddz/mgmt->lz + 0.5);
+        const double rij = sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+        const double asum = oi->primary_dim + oj->primary_dim;
+        const double dp = 2.*std::max(oi->primary_dim, 1.e-30);
+        const double gij = std::max(rij - asum, 0.)/dp;
+        const double wij = 1./pow(gij + gap_g0, gap_pow);
+        gap_weight_sum[i] += wij;
+        gap_weight_sum[j] += wij;
+        I_gap_total += wij;
+        if(rij < alpha_near*asum) {
+            near_count[i]++;
+            near_count[j]++;
+            near_pair_count++;
+            near_pair_weight_sum += wij;
+            unite(i,j);
+        }
+    }
+    std::vector<int> comp_size(pobj, 0);
+    for(int i=0;i<pobj;i++) comp_size[find_root(i)]++;
+    int cluster_count = 0, largest_cluster_size = 0, clustered_particles = 0;
+    double mean_cluster_size = 0.;
+    for(int i=0;i<pobj;i++) if(parent[i]==i) {
+        cluster_count++;
+        largest_cluster_size = std::max(largest_cluster_size, comp_size[i]);
+        mean_cluster_size += comp_size[i];
+    }
+    mean_cluster_size = cluster_count>0 ? mean_cluster_size/cluster_count : 0.;
+    for(int i=0;i<pobj;i++) {
+        const int root = find_root(i);
+        cluster_id[i] = root + 1;
+        cluster_size[i] = comp_size[root];
+        state[i] = (cluster_size[i]==1) ? 0 : ((cluster_size[i]==2) ? 1 : 2);
+        if(cluster_size[i]>=3) clustered_particles++;
     }
 
-    matrix grad_xi(0);
-    grad_xi.initialize(dR[0][0], dR[1][0], dR[2][0],
-                       dR[0][1], dR[1][1], dR[2][1],
-                       dR[0][2], dR[1][2], dR[2][2]);
-    matrix def_grad = grad_xi.inverse();
+    double local[40] = {0.};
+    local[20] = 1.e300; // min ppe
+    std::vector<double> plocal(pobj*pnq, 0.), pglobal(pobj*pnq, 0.);
 
-    sym_matrix sigma(0);
-    sigma = def_grad.aat();
-    const double sigma_avg = sigma.trace()/3.0;
-    for(int nn=0; nn<3; nn++) sigma(nn,nn) -= sigma_avg;
-    sigma.scale(G);
+    for(int k=0;k<so;k++) for(int j=0;j<sn;j++) for(int i=0;i<sm;i++) {
+        const int eid = index(i,j,k);
+        const double chi_f = chi_f_cell_value(eid), chi_p = 1.-chi_f;
+        const double up_full[3] = {u0[eid].vel[0] - g_frame_ubar_full[0], u0[eid].vel[1] - g_frame_ubar_full[1], u0[eid].vel[2] - g_frame_ubar_full[2]};
+        const double up_fluid[3] = {u0[eid].vel[0] - g_frame_ubar_fluid[0], u0[eid].vel[1] - g_frame_ubar_fluid[1], u0[eid].vel[2] - g_frame_ubar_fluid[2]};
+        const double s2 = strain_s2_cell_value(eid);
+        const double eps = ppe_cell_value(eid);
+        const double eps_all = 2.*(mgmt->fm.mu/mgmt->fm.rho)*s2;
+        const double ppe_centered = 2.*(mgmt->fm.mu/mgmt->fm.rho)*chi_f*centered_strain_s2_cell_value(eid);
+        const double ppf_fluid = ppf_cell_value(eid);
+        const double ppf_full = ppf_full_cell_value(eid);
+        double fp_rhs[3], fp_sd[3]; fp_total_cell_value(eid, fp_rhs); fp_stressdiv_cell_value(eid, fp_sd);
+        double fp_rhs_mag2 = 0., fp_diff_mag2 = 0., fp_rhs_linf = 0., fp_diff_linf = 0.;
+        for(int c=0;c<3;c++) {
+            const double diff = fp_rhs[c]-fp_sd[c];
+            fp_rhs_mag2 += fp_rhs[c]*fp_rhs[c];
+            fp_diff_mag2 += diff*diff;
+            fp_rhs_linf = std::max(fp_rhs_linf, fabs(fp_rhs[c]));
+            fp_diff_linf = std::max(fp_diff_linf, fabs(diff));
+        }
 
-    matrix gv;
-    velocity_grad(F, eid, gv);
+        local[0] += 0.5*(up_full[0]*up_full[0] + up_full[1]*up_full[1] + up_full[2]*up_full[2]);
+        local[1] += 0.5*chi_f*(up_fluid[0]*up_fluid[0] + up_fluid[1]*up_fluid[1] + up_fluid[2]*up_fluid[2]);
+        local[2] += eps_all;
+        local[3] += eps;
+        local[4] += ppf_full;
+        local[5] += ppf_full>0. ? ppf_full : 0.;
+        local[6] += ppf_full<0. ? -ppf_full : 0.;
+        local[7] += fabs(ppf_full);
+        local[8] += ppf_fluid;
+        local[9] += ppf_fluid>0. ? ppf_fluid : 0.;
+        local[10] += ppf_fluid<0. ? -ppf_fluid : 0.;
+        local[11] += fabs(ppf_fluid);
+        local[12] += fp_rhs_mag2;
+        local[13] += fp_diff_mag2;
+        local[14] = std::max(local[14], fp_rhs_linf);
+        local[15] = std::max(local[15], fp_diff_linf);
+        local[16] += (ppe_centered - eps)*(ppe_centered - eps);
+        local[17] += eps*eps;
+        local[18] += fabs(chi_f + chi_p - 1.);
+        local[19] += chi_p;
+        if(eps < local[20]) local[20] = eps;
 
-    for(int r=0; r<3; r++) for(int c=0; c<3; c++) value -= sigma(r,c)*gv(r,c);
-    return true;
+        int assign = -1;
+        if(pobj>0 && (fp_rhs_mag2>small || chi_p>0.5)) {
+            double best = 1.e300;
+            for(int po=0; po<pobj; po++) {
+                object *obj = mgmt->objs[po];
+                double ddx = lx0[i] - obj->c[0], ddy = ly0[j] - obj->c[1], ddz = lz0[k] - obj->c[2];
+                if(mgmt->x_prd) ddx -= mgmt->lx*floor(ddx/mgmt->lx + 0.5);
+                if(mgmt->y_prd) ddy -= mgmt->ly*floor(ddy/mgmt->ly + 0.5);
+                if(mgmt->z_prd) ddz -= mgmt->lz*floor(ddz/mgmt->lz + 0.5);
+                const double r2 = ddx*ddx + ddy*ddy + ddz*ddz;
+                if(r2<best) {best=r2; assign=po;}
+            }
+        }
+        if(assign>=0) {
+            double *q = &plocal[assign*pnq];
+            q[0] += ppf_full*dvol;
+            q[1] += fabs(ppf_full)*dvol;
+            q[2] += (ppf_full>0. ? ppf_full : 0.)*dvol;
+            q[3] += (ppf_full<0. ? -ppf_full : 0.)*dvol;
+        }
+        for(int po=0; po<pobj; po++) {
+            object *obj = mgmt->objs[po];
+            double ddx = lx0[i] - obj->c[0], ddy = ly0[j] - obj->c[1], ddz = lz0[k] - obj->c[2];
+            if(mgmt->x_prd) ddx -= mgmt->lx*floor(ddx/mgmt->lx + 0.5);
+            if(mgmt->y_prd) ddy -= mgmt->ly*floor(ddy/mgmt->ly + 0.5);
+            if(mgmt->z_prd) ddz -= mgmt->lz*floor(ddz/mgmt->lz + 0.5);
+            const double rnear = 3.0*obj->primary_dim; // 1.5*dp for spherical primary_dim=radius
+            if(ddx*ddx + ddy*ddy + ddz*ddz < rnear*rnear) {
+                double *q = &plocal[po*pnq];
+                q[4] += eps*dvol;
+                q[5] += s2*dvol;
+                q[6] += ppf_fluid*dvol;
+                q[7] += fabs(ppf_fluid)*dvol;
+                q[8] += (ppf_fluid>0. ? ppf_fluid : 0.)*dvol;
+                q[9] += (ppf_fluid<0. ? -ppf_fluid : 0.)*dvol;
+                q[10] += 1.;
+                q[11] += dvol;
+            }
+        }
+    }
+    if(pobj>0) MPI_Reduce(&plocal[0], &pglobal[0], pobj*pnq, MPI_DOUBLE, MPI_SUM, 0, world);
+
+    double global[40] = {0.};
+    MPI_Allreduce(local, global, 14, MPI_DOUBLE, MPI_SUM, world);
+    MPI_Allreduce(local+14, global+14, 2, MPI_DOUBLE, MPI_MAX, world);
+    MPI_Allreduce(local+16, global+16, 4, MPI_DOUBLE, MPI_SUM, world);
+    MPI_Allreduce(local+20, global+20, 1, MPI_DOUBLE, MPI_MIN, world);
+
+    const double denom = static_cast<double>(m)*static_cast<double>(n)*static_cast<double>(o);
+    for(int q=0;q<=13;q++) global[q] /= denom;
+    for(int q=16;q<=19;q++) global[q] /= denom;
+    const double PPF_full_asym = (global[5]-global[6]) / std::max(global[5]+global[6], small);
+    const double PPF_fluid_asym = (global[9]-global[10]) / std::max(global[9]+global[10], small);
+    const double fp_l2_rel = sqrt(global[13]) / std::max(sqrt(global[12]), small);
+    const double fp_linf_rel = global[15] / std::max(global[14], small);
+    const double ppe_centered_rel = sqrt(global[16]) / std::max(sqrt(global[17]), small);
+    const double nanv = std::numeric_limits<double>::quiet_NaN();
+
+    if(rank==0) {
+        char filename[512];
+        sprintf(filename, "%s/frame_diagnostics.%05d", dirname, frame_num);
+        FILE *fh = p_safe_fopen(filename, "w");
+        fprintf(fh,"K_full %.17g\nK_fluid %.17g\n", global[0], global[1]);
+        fprintf(fh,"eps_full %.17g\neps_fluid %.17g\n", global[2], global[3]);
+        fprintf(fh,"Wp_full %.17g\nWp_full_pos %.17g\nWp_full_neg %.17g\nWp_full_abs %.17g\nPPF_full_asymmetry %.17g\n", global[4], global[5], global[6], global[7], PPF_full_asym);
+        fprintf(fh,"Wp_fluid %.17g\nWp_fluid_pos %.17g\nWp_fluid_neg %.17g\nWp_fluid_abs %.17g\nPPF_fluid_asymmetry %.17g\n", global[8], global[9], global[10], global[11], PPF_fluid_asym);
+        fprintf(fh,"ubar_full_x %.17g\nubar_full_y %.17g\nubar_full_z %.17g\n", g_frame_ubar_full[0], g_frame_ubar_full[1], g_frame_ubar_full[2]);
+        fprintf(fh,"ubar_fluid_x %.17g\nubar_fluid_y %.17g\nubar_fluid_z %.17g\n", g_frame_ubar_fluid[0], g_frame_ubar_fluid[1], g_frame_ubar_fluid[2]);
+        fprintf(fh,"dK_full_dt %.17g\ndK_fluid_dt %.17g\n", nanv, nanv);
+        fprintf(fh,"residual_full %.17g\nresidual_full_normalized %.17g\nresidual_fluid %.17g\nresidual_fluid_normalized %.17g\n", nanv, nanv, nanv, nanv);
+        fprintf(fh,"fp_rhs_stressdiv_l2_rel_error %.17g\nfp_rhs_stressdiv_linf_rel_error %.17g\n", fp_l2_rel, fp_linf_rel);
+        fprintf(fh,"ppe_centered_vs_solver_l2_rel_error %.17g\n", ppe_centered_rel);
+        fprintf(fh,"ppf_force_mean %.17g\nppf_stress_mean %.17g\nppf_force_stress_rel_error %.17g\n", global[8], nanv, nanv);
+        fprintf(fh,"min_ppe3d %.17g\nchi_sum_mismatch_mean %.17g\nparticle_volume_fraction_cells %.17g\n", global[20], global[18], global[19]);
+        fprintf(fh,"cluster_count %d\nlargest_cluster_size %d\nlargest_cluster_fraction %.17g\nmean_cluster_size %.17g\nclustered_particle_fraction %.17g\n", cluster_count, largest_cluster_size, pobj>0?double(largest_cluster_size)/pobj:0., mean_cluster_size, pobj>0?double(clustered_particles)/pobj:0.);
+        fprintf(fh,"I_gap_total %.17g\nI_gap_per_particle %.17g\nmean_pair_weight %.17g\n", I_gap_total, pobj>0?I_gap_total/pobj:0., near_pair_count>0?near_pair_weight_sum/near_pair_count:0.);
+
+        double ppf_abs_sum = 0.;
+        std::vector<double> ppf_abs(pobj, 0.);
+        for(int p=0;p<pobj;p++) { ppf_abs[p] = pglobal[p*pnq+1]; ppf_abs_sum += ppf_abs[p]; }
+        std::vector<double> sorted_abs = ppf_abs;
+        std::sort(sorted_abs.begin(), sorted_abs.end(), [](double a,double b){return a>b;});
+        auto top_share = [&](double frac) -> double { int nsel = pobj>0 ? std::max(1, int(ceil(frac*pobj))) : 0; double s=0.; for(int i=0;i<nsel && i<pobj;i++) s+=sorted_abs[i]; return s/std::max(ppf_abs_sum, small); };
+        double hhi=0., cluster_share=0., pair_share=0., iso_share=0.;
+        for(int p=0;p<pobj;p++) {
+            const double w = ppf_abs[p]/std::max(ppf_abs_sum, small);
+            hhi += w*w;
+            if(state[p]==2) cluster_share += ppf_abs[p];
+            else if(state[p]==1) pair_share += ppf_abs[p];
+            else iso_share += ppf_abs[p];
+        }
+        fprintf(fh,"PPF_top10_share %.17g\nPPF_top20_share %.17g\nPPF_Herfindahl_index %.17g\nPPF_cluster_share %.17g\nPPF_pair_like_share %.17g\nPPF_isolated_share %.17g\n", top_share(0.10), top_share(0.20), hhi, cluster_share/std::max(ppf_abs_sum, small), pair_share/std::max(ppf_abs_sum, small), iso_share/std::max(ppf_abs_sum, small));
+        fclose(fh);
+
+        sprintf(filename, "%s/particles.%05d", dirname, frame_num);
+        fh = p_safe_fopen(filename, "w");
+        fprintf(fh,"# id center_x center_y center_z radius equivalent_radius volume deformation_available aspect_ratio principal_axis_x principal_axis_y principal_axis_z near_neighbor_count gap_weight_sum cluster_id cluster_size state ppf_i_total ppf_i_abs ppf_i_pos ppf_i_neg eps_near_i S2_near_i ppf_near_i_total ppf_near_i_abs ppf_near_i_pos ppf_near_i_neg local_neighborhood_cell_count local_neighborhood_volume\n");
+        for(int p=0;p<pobj;p++) {
+            object *obj = mgmt->objs[p];
+            const double *q = &pglobal[p*pnq];
+            const double vnear = std::max(q[11], small);
+            fprintf(fh,"%d %.17g %.17g %.17g %.17g %.17g %.17g %d %.17g %.17g %.17g %.17g %d %.17g %d %d %d %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g\n",
+                    p+1, obj->c[0], obj->c[1], obj->c[2], obj->primary_dim, obj->primary_dim, obj->volume,
+                    0, nanv, nanv, nanv, nanv, near_count[p], gap_weight_sum[p], cluster_id[p], cluster_size[p], state[p],
+                    q[0], q[1], q[2], q[3], q[4]/vnear, q[5]/vnear, q[6]/vnear, q[7]/vnear, q[8]/vnear, q[9]/vnear, q[10], q[11]);
+        }
+        fclose(fh);
+    }
+}
+
+void fluid_3d::write_3d_metadata(const char* dirname,const int frame_num) {
+    if(rank!=0) return;
+    char filename[512];
+    sprintf(filename, "%s/frame_fields.%05d.meta", dirname, frame_num);
+    FILE *fh = p_safe_fopen(filename, "w");
+    fprintf(fh,"# Native binary datasets mirror the requested HDF5 paths. Convert name.<frame> to /fields/name.\n");
+    fprintf(fh,"dimensions %d %d %d\n", m,n,o);
+    fprintf(fh,"diagnostics_file frame_diagnostics.%05d\n", frame_num);
+    fprintf(fh,"particles_file particles.%05d\n", frame_num);
+    write_scalar_attr(fh,"/fields/ppe3d","2 * nu * chi_f * S'_{ij}S'_{ij}, where S' is computed from velocity fluctuations using the solver-consistent face-normal fluid_stress operator averaged to cell centers","length^2/time^3","positive definite carrier-fluid viscous dissipation density per unit mass",this,frame_num);
+    write_scalar_attr(fh,"/fields/eps_all_3d","2 * nu * S'_{ij}S'_{ij}; full-domain one-fluid diagnostic using the solver-consistent face-normal fluid_stress operator averaged to cell centers","length^2/time^3","non-negative diagnostic",this,frame_num);
+    write_scalar_attr(fh,"/fields/ppe_centered_debug","debug-only centered-difference 2 * nu * chi_f * S_{ij}S_{ij}; not the formal budget ppe3d unless identical to the solver operator","length^2/time^3","debug non-negative diagnostic",this,frame_num);
+    write_scalar_attr(fh,"/fields/ppf3d","carrier-fluid masked power density chi_f * u'_fluid_i * fp_total_i, where fp_total_i is cached from the actual particle-feedback acceleration used in the momentum RHS","length^2/time^3","positive means particle feedback injects kinetic energy into carrier-fluid velocity fluctuation; negative means extraction",this,frame_num);
+    write_scalar_attr(fh,"/fields/ppf3d_full","full-domain one-fluid power density u'_full_i * fp_total_i for spectral velocity-force cross budgets","length^2/time^3","positive means particle feedback injects kinetic energy into full-domain velocity fluctuation; negative means extraction",this,frame_num);
+    write_scalar_attr(fh,"/fields/fp_total_x","fp_total is the actual particle-feedback acceleration used in the momentum RHS; x component cached during compute_ustar/acceleration, not reconstructed at output time","acceleration","positive x acceleration on the momentum RHS",this,frame_num);
+    write_scalar_attr(fh,"/fields/fp_total_y","fp_total is the actual particle-feedback acceleration used in the momentum RHS; y component cached during compute_ustar/acceleration, not reconstructed at output time","acceleration","positive y acceleration on the momentum RHS",this,frame_num);
+    write_scalar_attr(fh,"/fields/fp_total_z","fp_total is the actual particle-feedback acceleration used in the momentum RHS; z component cached during compute_ustar/acceleration, not reconstructed at output time","acceleration","positive z acceleration on the momentum RHS",this,frame_num);
+    write_scalar_attr(fh,"/fields/fp_stressdiv_x","debug-only stress-divergence reconstruction div(sigma_total - sigma_fluid_pure), x component; not used as formal fp_total","acceleration","debug reconstruction",this,frame_num);
+    write_scalar_attr(fh,"/fields/fp_stressdiv_y","debug-only stress-divergence reconstruction div(sigma_total - sigma_fluid_pure), y component; not used as formal fp_total","acceleration","debug reconstruction",this,frame_num);
+    write_scalar_attr(fh,"/fields/fp_stressdiv_z","debug-only stress-divergence reconstruction div(sigma_total - sigma_fluid_pure), z component; not used as formal fp_total","acceleration","debug reconstruction",this,frame_num);
+    write_scalar_attr(fh,"/fields/u_x","x component of carrier/mixture velocity stored on the solver cell-centered grid","velocity","positive x velocity",this,frame_num);
+    write_scalar_attr(fh,"/fields/u_y","y component of carrier/mixture velocity stored on the solver cell-centered grid","velocity","positive y velocity",this,frame_num);
+    write_scalar_attr(fh,"/fields/u_z","z component of carrier/mixture velocity stored on the solver cell-centered grid","velocity","positive z velocity",this,frame_num);
+    write_scalar_attr(fh,"/fields/chi_f","1 for carrier-fluid cells and 0 for particle/solid cells; chi_f + chi_p = 1","dimensionless","mask",this,frame_num);
+    write_scalar_attr(fh,"/fields/chi_p","1 for particle/solid cells and 0 for carrier-fluid cells; chi_f + chi_p = 1","dimensionless","mask",this,frame_num);
+    write_scalar_attr(fh,"/fields/sigma_total_xx","total solver stress tensor component averaged from face stresses; mixed stress, not pure elastic sigma_e","stress-like solver units","diagnostic total stress",this,frame_num);
+    write_attr(fh,"/diagnostics/K_full","budget_domain","full-domain one-fluid");
+    write_attr(fh,"/diagnostics/K_fluid","budget_domain","carrier-fluid masked");
+    write_attr(fh,"/diagnostics/dK_full_dt","definition","NaN online because future frame is unavailable; compute from K_full time series in post-processing");
+    write_attr(fh,"/diagnostics/dK_fluid_dt","definition","NaN online because future frame is unavailable; compute from K_fluid time series in post-processing");
+    write_attr(fh,"/diagnostics/residual_full","definition","dK_full_dt + eps_full - Wp_full; NaN online until dK_full_dt is available");
+    write_attr(fh,"/diagnostics/residual_fluid","definition","dK_fluid_dt + eps_fluid - Wp_fluid; NaN online until dK_fluid_dt is available");
+    write_attr(fh,"/diagnostics/ubar_full_x","average_definition","full-domain spatial average");
+    write_attr(fh,"/diagnostics/ubar_fluid_x","average_definition","chi_f-weighted carrier-fluid spatial average");
+    write_attr(fh,"/particles","particle_power_support","forcing/particle-interior nearest-center assigned using ppf3d_full and cached fp_rhs_total support");
+    write_attr(fh,"/particles","deformation_available","0");
+    write_attr(fh,"/particles","deformation_definition","unavailable in this solver output path; aspect ratio and principal axis are NaN rather than zero-filled");
+    write_attr(fh,"/particles","alpha_near","1.5");
+    write_attr(fh,"/particles","g0","1e-6");
+    write_attr(fh,"/particles","p","1");
+    write_attr(fh,"/particles","cluster_threshold","3");
+    write_attr(fh,"/particles","periodic_distance_used","true");
+    fclose(fh);
 }

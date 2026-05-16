@@ -43,6 +43,7 @@ fluid_3d::fluid_3d(geometry *gm, sim_manager *mgmt_, sim_params *spars_) :
 #endif
     tr(NULL),grid(gm),
 	u_mem(new field[smn4*so4]),u0(u_mem+2*(1+sm4*(1+sn4))),
+	fp_rhs_total_mem(new double[3*smn4*so4]),fp_rhs_total0(fp_rhs_total_mem+3*2*(1+sm4*(1+sn4))),
     // New density and level-set field
 #if defined(VAR_DEN)
     lrho(new double[smn4*so4]),
@@ -73,6 +74,7 @@ fluid_3d::fluid_3d(geometry *gm, sim_manager *mgmt_, sim_params *spars_) :
 	if(spars->display) display_stats();
 	set_omp(spars->omp_num_thr);
 
+    clear_fp_rhs_total();
     printf("#### I'm rank %d, my own box (%d %d %d) to (%d %d %d)\n", rank, ai, aj, ak, bi, bj, bk);
 }
 
@@ -98,6 +100,7 @@ fluid_3d::~fluid_3d() {
 	delete[] gy;
 	delete[] gx;
 	delete[] rm_mem;
+	delete[] fp_rhs_total_mem;
 	delete[] u_mem;
 #if defined(VAR_DEN)
     delete[] lrho;
@@ -1033,6 +1036,26 @@ void fluid_3d::compute_tang_derivatives(bool verbose){
 }
 #endif
 
+
+void fluid_3d::clear_fp_rhs_total(){
+    const int len = 3*smn4*so4;
+    for(int i=0;i<len;i++) fp_rhs_total_mem[i] = 0.;
+}
+
+void fluid_3d::pure_fluid_stress_divergence(int eid,double (&acc)[3]){
+    const int strides[3] = {1, sm4, smn4};
+    const double invh[3] = {dxsp, dysp, dzsp};
+    for(int c=0;c<3;c++) acc[c] = 0.;
+    for(int face=0; face<3; face++) {
+        const int strd = strides[face];
+        for(int c=0;c<3;c++) {
+            const double lower = mgmt->fm.mu * invh[face] * (u0[eid].vel[c] - u0[eid-strd].vel[c]);
+            const double upper = mgmt->fm.mu * invh[face] * (u0[eid+strd].vel[c] - u0[eid].vel[c]);
+            acc[c] += invh[face]*(upper - lower);
+        }
+    }
+}
+
 /** Compute all the terms contribute to accelearation at t=time.
  * 	Result doesn't have dt multiplied.
  * \param[in] ijk field node position relative to u0.
@@ -1045,26 +1068,32 @@ void fluid_3d::compute_tang_derivatives(bool verbose){
 void fluid_3d::acceleration(int ijk,double myx,double myy, double myz,double (&acc)[3],bool pres,bool gdn_ex, bool verbose){
 	field *fp = u0+ijk;
 	int eid = ijk + G0;
+	double stress_acc[3] = {0.,0.,0.};
 	// compute acceleration due to stress imbalance.
-	acc[0] += dxsp*(fp[1].sigma[0][0] - fp->sigma[0][0])
+	stress_acc[0] = dxsp*(fp[1].sigma[0][0] - fp->sigma[0][0])
 				+ dysp*(fp[sm4].sigma[1][0] -fp->sigma[1][0])
 				+ dzsp*(fp[smn4].sigma[2][0] - fp->sigma[2][0]);
 
-	acc[1] += dxsp*(fp[1].sigma[0][1] - fp->sigma[0][1])
+	stress_acc[1] = dxsp*(fp[1].sigma[0][1] - fp->sigma[0][1])
 				+ dysp*(fp[sm4].sigma[1][1] -fp->sigma[1][1])
 				+ dzsp*(fp[smn4].sigma[2][1] - fp->sigma[2][1]);
 
-	acc[2] += dxsp*(fp[1].sigma[0][2] - fp->sigma[0][2])
+	stress_acc[2] = dxsp*(fp[1].sigma[0][2] - fp->sigma[0][2])
 				+ dysp*(fp[sm4].sigma[1][2] -fp->sigma[1][2])
 				+ dzsp*(fp[smn4].sigma[2][2] - fp->sigma[2][2]);
 
+double pure_fluid_acc[3] = {0.,0.,0.};
+    pure_fluid_stress_divergence(ijk, pure_fluid_acc);
+    double particle_rhs[3] = {stress_acc[0]-pure_fluid_acc[0], stress_acc[1]-pure_fluid_acc[1], stress_acc[2]-pure_fluid_acc[2]};
+	
 	//calculate pressure gradient
 	double tmp[3] = {0,0,0};
 	if(pres) neg_pres_grad(fp,tmp);
 	for(int i=0;i<3;i++) {
-        acc[i] += tmp[i];
+        acc[i] += stress_acc[i] + tmp[i];
 #if defined(VAR_DEN)
         acc[i] /= lrho[eid];
+        particle_rhs[i] /= lrho[eid];
 #endif
     }
 
@@ -1088,7 +1117,12 @@ void fluid_3d::acceleration(int ijk,double myx,double myy, double myz,double (&a
 	}
     if(sfrac>1.) for(int nn=0;nn<3;nn++) tmp[nn] /= sfrac;
 
-    for(int nn=0;nn<3;nn++) acc[nn] += tmp[nn];
+    for(int nn=0;nn<3;nn++) {
+        acc[nn] += tmp[nn];
+        particle_rhs[nn] += tmp[nn];
+    }
+
+    if(!gdn_ex) for(int nn=0;nn<3;nn++) fp_rhs_total0[3*ijk+nn] = particle_rhs[nn];
 
     if(sfrac<1.) {
         // get the fluid acceleration
@@ -1446,6 +1480,7 @@ void fluid_3d::update_reference_map_full(bool verbose){
 void fluid_3d::compute_ustar(const double cdt, bool verbose){
 
 	if(verbose) printf("Rank %d. Compute u star.\n",rank);
+	clear_fp_rhs_total();
 	for (int kk =0; kk < so; kk++) {
 		double zz = lz0[kk];
 		for (int jj =0; jj < sn; jj++) {
