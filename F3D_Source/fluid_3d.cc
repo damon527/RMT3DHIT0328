@@ -592,6 +592,9 @@ update_isotropic_turbulence_forcing();
     // Also communicate dvel
     communicate<2048>();
 
+budget_accumulate_continuous(dt);
+    budget_record_step();
+    
 	// Mutigrid info pass into output string
 	if (out != NULL && rank == 0) {
 		if (godunov) sprintf(out,"%s%s",out,*mac.out);
@@ -1054,6 +1057,10 @@ void fluid_3d::pure_fluid_stress_divergence(int eid,double (&acc)[3]){
             acc[c] += invh[face]*(upper - lower);
         }
     }
+    #if defined(VAR_DEN)
+    const double rho = lrho[eid+G0];
+    if(rho!=0.) for(int c=0;c<3;c++) acc[c] /= rho;
+#endif
 }
 
 /** Compute all the terms contribute to accelearation at t=time.
@@ -1480,6 +1487,11 @@ void fluid_3d::update_reference_map_full(bool verbose){
 void fluid_3d::compute_ustar(const double cdt, bool verbose){
 
 	if(verbose) printf("Rank %d. Compute u star.\n",rank);
+	if(!budget.initialized) budget_start_frame();
+	const double K_combined_before = full_domain_tke();
+	double ubar_before[3];
+	full_domain_mean_velocity(ubar_before);
+	double local_linear[4] = {0.,0.,0.,0.};
 	clear_fp_rhs_total();
 	for (int kk =0; kk < so; kk++) {
 		double zz = lz0[kk];
@@ -1491,11 +1503,17 @@ void fluid_3d::compute_ustar(const double cdt, bool verbose){
 				field *fp = u0+eid;
 				field &f = *fp;
 
+                                double vel_before[3] = {f.vel[0], f.vel[1], f.vel[2]};
 				double acc[3] = {0,0,0};
 				// ustar calculation doesn't take pressure gradient into account
 				// also if implicit stress stencil is used, acc doesn't get doubled
                 bool gdn = false;
 				acceleration(eid,xx,yy,zz,acc,pres_update,gdn);
+				double pure_fluid_acc[3] = {0.,0.,0.};
+				pure_fluid_stress_divergence(eid, pure_fluid_acc);
+				double particle_acc[3] = {0.,0.,0.};
+				fp_total_cell_value(eid, particle_acc);
+				double external_acc[3] = {acc[0]-pure_fluid_acc[0]-particle_acc[0], acc[1]-pure_fluid_acc[1]-particle_acc[1], acc[2]-pure_fluid_acc[2]-particle_acc[2]};
 				// add all contributions to the extrapolation term F. See Yu (2003) Eqn 3.13
 
 				// compute prefactor
@@ -1505,21 +1523,45 @@ void fluid_3d::compute_ustar(const double cdt, bool verbose){
 				avgs[2] =-0.5*cdt*(f.fvel[4][2] + f.fvel[5][2])*dzsp;
 
 				double dvel[3] = {0,0,0};
+				double adv_dvel[3] = {0,0,0};
 				// apply advective operator for each vel component
 				for(int dir=0; dir<3; dir++) {
-					dvel[dir] = avgs[0]*(f.fvel[1][dir]-f.fvel[0][dir]) + avgs[1] *(f.fvel[3][dir] - f.fvel[2][dir]) + avgs[2] *(f.fvel[5][dir] - f.fvel[4][dir]);
+					adv_dvel[dir] = avgs[0]*(f.fvel[1][dir]-f.fvel[0][dir]) + avgs[1] *(f.fvel[3][dir] - f.fvel[2][dir]) + avgs[2] *(f.fvel[5][dir] - f.fvel[4][dir]);
+					dvel[dir] = adv_dvel[dir];
 					acc[dir] *= cdt;
 				}
 				for(int dir=0; dir<3; dir++) {
 					dvel[dir] += acc[dir];
                 }
+                for(int dir=0; dir<3; dir++) {
+					const double up = vel_before[dir] - ubar_before[dir];
+					local_linear[0] += up*adv_dvel[dir];
+					local_linear[1] += up*(cdt*pure_fluid_acc[dir]);
+					local_linear[2] += up*(cdt*particle_acc[dir]);
+					local_linear[3] += up*(cdt*external_acc[dir]);
+				}
 				f.reset_vel_derivs();
 				f.add_vel_derivs(dvel);
 				f.update_vels();
 			}
 		}
 	}
-	if(impl) impl_timestep();
+	double global_linear[4] = {0.,0.,0.,0.};
+	MPI_Allreduce(local_linear, global_linear, 4, MPI_DOUBLE, MPI_SUM, world);
+	const double denom = static_cast<double>(m)*static_cast<double>(n)*static_cast<double>(o);
+	for(int q=0;q<4;q++) global_linear[q] /= denom;
+	const double K_combined_after = full_domain_tke();
+	budget_add_increment(BUDGET_ADV, global_linear[0]);
+	budget_add_increment(BUDGET_VISC, global_linear[1]);
+	budget_add_increment(BUDGET_PARTICLE, global_linear[2]);
+	budget_add_increment(BUDGET_EXTERNAL, global_linear[3]);
+	budget_add_increment(BUDGET_SPLIT_REMAINDER, (K_combined_after-K_combined_before) - (global_linear[0]+global_linear[1]+global_linear[2]+global_linear[3]));
+	if(impl) {
+		const double K_impl_before = full_domain_tke();
+		impl_timestep();
+		const double K_impl_after = full_domain_tke();
+		budget_add_increment(BUDGET_VISC, K_impl_after-K_impl_before);
+	}
 
 }
 
@@ -2846,7 +2888,11 @@ int fluid_3d::pp_solve(bool verbose) {
 	communicate<2>();
 
     watch.tic(1);
+    if(!budget.initialized) budget_start_frame();
+    const double K_proj_before = full_domain_tke();
 	subtract_pres_grad();
+	const double K_proj_after = full_domain_tke();
+    budget_add_increment(BUDGET_PROJECTION, K_proj_after-K_proj_before);
     watch.toc(1);
 
     return 0;

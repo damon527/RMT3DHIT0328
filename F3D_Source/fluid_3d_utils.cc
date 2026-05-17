@@ -1400,3 +1400,93 @@ double fluid_3d::check_steady_solution() {
     return global_max;
 }
 */
+
+/** Full-domain arithmetic mean velocity used by the one-fluid fluctuation TKE budget. */
+void fluid_3d::full_domain_mean_velocity(double (&ubar)[3]) {
+    double local[3] = {0.,0.,0.};
+    double global[3] = {0.,0.,0.};
+    for(int kk=0; kk<so; kk++) for(int jj=0; jj<sn; jj++) for(int ii=0; ii<sm; ii++) {
+        const int eid = index(ii,jj,kk);
+        for(int c=0;c<3;c++) local[c] += u0[eid].vel[c];
+    }
+    MPI_Allreduce(local, global, 3, MPI_DOUBLE, MPI_SUM, world);
+    const double denom = static_cast<double>(m)*static_cast<double>(n)*static_cast<double>(o);
+    for(int c=0;c<3;c++) ubar[c] = global[c]/denom;
+}
+
+/** Full-domain one-fluid fluctuation kinetic energy K = 0.5 <|u-<u>|^2>. */
+double fluid_3d::full_domain_tke() {
+    double ubar[3];
+    full_domain_mean_velocity(ubar);
+    double local = 0., global = 0.;
+    for(int kk=0; kk<so; kk++) for(int jj=0; jj<sn; jj++) for(int ii=0; ii<sm; ii++) {
+        const int eid = index(ii,jj,kk);
+        double v2 = 0.;
+        for(int c=0;c<3;c++) {
+            const double up = u0[eid].vel[c] - ubar[c];
+            v2 += up*up;
+        }
+        local += 0.5*v2;
+    }
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_SUM, world);
+    const double denom = static_cast<double>(m)*static_cast<double>(n)*static_cast<double>(o);
+    return global/denom;
+}
+
+void fluid_3d::budget_add_increment(budget_bucket bucket,double dK) {
+    if(bucket>=0 && bucket<BUDGET_NBUCKETS) budget.dK[bucket] += dK;
+}
+
+void fluid_3d::budget_start_frame() {
+    for(int i=0;i<BUDGET_NBUCKETS;i++) budget.dK[i]=0.;
+    budget.epsilon_full_integral = 0.;
+    budget.Wp_full_integral = 0.;
+    budget.Wp_full_pos_integral = 0.;
+    budget.Wp_full_neg_integral = 0.;
+    budget.Wp_full_abs_integral = 0.;
+    budget.nsteps_accumulated = 0;
+    budget.t_start = time;
+    budget.t_end = time;
+    budget.K_start = full_domain_tke();
+    budget.K_end = budget.K_start;
+    budget.initialized = true;
+}
+
+void fluid_3d::budget_finish_frame() {
+    if(!budget.initialized) budget_start_frame();
+    budget.t_end = time;
+    budget.K_end = full_domain_tke();
+}
+
+void fluid_3d::budget_record_step() {
+    if(!budget.initialized) budget_start_frame();
+    budget.nsteps_accumulated++;
+}
+
+void fluid_3d::budget_accumulate_continuous(double cdt) {
+    if(!budget.initialized) budget_start_frame();
+    double ubar[3];
+    full_domain_mean_velocity(ubar);
+    double local[5] = {0.,0.,0.,0.,0.};
+    double global[5] = {0.,0.,0.,0.,0.};
+    for(int k=0;k<so;k++) for(int j=0;j<sn;j++) for(int i=0;i<sm;i++) {
+        const int eid = index(i,j,k);
+        const double eps_all = 2.*(mgmt->fm.mu/mgmt->fm.rho)*strain_s2_cell_value(eid);
+        double fp[3];
+        fp_total_cell_value(eid, fp);
+        double ppf_full = 0.;
+        for(int c=0;c<3;c++) ppf_full += (u0[eid].vel[c] - ubar[c])*fp[c];
+        local[0] += eps_all;
+        local[1] += ppf_full;
+        local[2] += ppf_full>0. ? ppf_full : 0.;
+        local[3] += ppf_full<0. ? -ppf_full : 0.;
+        local[4] += fabs(ppf_full);
+    }
+    MPI_Allreduce(local, global, 5, MPI_DOUBLE, MPI_SUM, world);
+    const double denom = static_cast<double>(m)*static_cast<double>(n)*static_cast<double>(o);
+    budget.epsilon_full_integral += cdt*global[0]/denom;
+    budget.Wp_full_integral += cdt*global[1]/denom;
+    budget.Wp_full_pos_integral += cdt*global[2]/denom;
+    budget.Wp_full_neg_integral += cdt*global[3]/denom;
+    budget.Wp_full_abs_integral += cdt*global[4]/denom;
+}

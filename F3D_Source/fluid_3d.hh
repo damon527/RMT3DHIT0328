@@ -192,6 +192,27 @@ class fluid_3d {
 	timer watch;
 	extrap_helper<3> expper;
 
+// Solver-discrete full-domain fluctuation kinetic-energy budget.
+	enum budget_bucket {
+		BUDGET_ADV=0, BUDGET_VISC, BUDGET_PARTICLE, BUDGET_PROJECTION,
+		BUDGET_CONSTRAINT, BUDGET_CONTACT, BUDGET_PENALTY, BUDGET_RESET,
+		BUDGET_FILTER, BUDGET_EXTERNAL, BUDGET_OTHER, BUDGET_SPLIT_REMAINDER,
+		BUDGET_NBUCKETS
+	};
+	struct budget_accumulator {
+		double t_start, t_end, K_start, K_end;
+		double dK[BUDGET_NBUCKETS];
+		double epsilon_full_integral, Wp_full_integral, Wp_full_pos_integral, Wp_full_neg_integral, Wp_full_abs_integral;
+		int nsteps_accumulated;
+		bool initialized;
+		budget_accumulator() : t_start(0.), t_end(0.), K_start(0.), K_end(0.),
+			epsilon_full_integral(0.), Wp_full_integral(0.), Wp_full_pos_integral(0.),
+			Wp_full_neg_integral(0.), Wp_full_abs_integral(0.), nsteps_accumulated(0), initialized(false) {
+			for(int i=0;i<BUDGET_NBUCKETS;i++) dK[i]=0.;
+		}
+	};
+	budget_accumulator budget;
+	
 	// ##### class functions #####
 
 	/** Constructors and destructor*/
@@ -271,6 +292,13 @@ class fluid_3d {
 	void solid_fractions(int ind, std::vector<solid_frac> &s_fracs);
 	int nface(int tag, int& ti, int& tj, int& tk);
 	void record_magnitude();
+	double full_domain_tke();
+	void full_domain_mean_velocity(double (&ubar)[3]);
+	void budget_add_increment(budget_bucket bucket,double dK);
+	void budget_start_frame();
+	void budget_finish_frame();
+	void budget_accumulate_continuous(double cdt);
+	void budget_record_step();
 
 	/** Problem set up */
 	int initialize();

@@ -1162,8 +1162,10 @@ void fluid_3d::write_3d_exchange_fields(const char* dirname, const int frame_num
         sprintf(filename, "%s/%s.%05d", dirname, names[f], frame_num);
         write_scalar_3d_binary(filename, field_ids[f]);
     }
+    budget_finish_frame();
     write_frame_diagnostics(dirname, frame_num);
     write_3d_metadata(dirname, frame_num);
+    budget_start_frame();
 }
 
 void fluid_3d::write_scalar_3d_binary(const char* filename, int field_type) {
@@ -1503,19 +1505,55 @@ void fluid_3d::write_frame_diagnostics(const char* dirname,const int frame_num) 
     const double fp_linf_rel = global[15] / std::max(global[14], small);
     const double ppe_centered_rel = sqrt(global[16]) / std::max(sqrt(global[17]), small);
     const double nanv = std::numeric_limits<double>::quiet_NaN();
+    
+    const double dt_frame = budget.t_end - budget.t_start;
+    const double K_full_prev = budget.initialized ? budget.K_start : global[0];
+    const double dK_full = global[0] - K_full_prev;
+    const double dK_full_dt_eff = (dt_frame>0.) ? dK_full/dt_frame : nanv;
+    const double eps_full_budget = (dt_frame>0. && budget.nsteps_accumulated>0) ? budget.epsilon_full_integral/dt_frame : global[2];
+    const double Wp_full_budget = (dt_frame>0. && budget.nsteps_accumulated>0) ? budget.Wp_full_integral/dt_frame : global[4];
+    const double Wp_full_pos_budget = (dt_frame>0. && budget.nsteps_accumulated>0) ? budget.Wp_full_pos_integral/dt_frame : global[5];
+    const double Wp_full_neg_budget = (dt_frame>0. && budget.nsteps_accumulated>0) ? budget.Wp_full_neg_integral/dt_frame : global[6];
+    const double Wp_full_abs_budget = (dt_frame>0. && budget.nsteps_accumulated>0) ? budget.Wp_full_abs_integral/dt_frame : global[7];
+    double Pdisc[BUDGET_NBUCKETS] = {0.};
+    double sumP = 0., sumAbsP = 0.;
+    for(int b=0;b<BUDGET_NBUCKETS;b++) {
+        Pdisc[b] = (dt_frame>0.) ? budget.dK[b]/dt_frame : nanv;
+        if(dt_frame>0.) { sumP += Pdisc[b]; sumAbsP += fabs(Pdisc[b]); }
+    }
+    const double P_eff_from_velocity_increment = (dt_frame>0.) ? dK_full/dt_frame : nanv;
+    const double velocity_identity_error = (dt_frame>0.) ? dK_full_dt_eff - P_eff_from_velocity_increment : nanv;
+    const double R_classical = (dt_frame>0.) ? dK_full_dt_eff + eps_full_budget - Wp_full_budget : nanv;
+    const double R_classical_norm = (dt_frame>0.) ? R_classical/std::max(eps_full_budget + fabs(Wp_full_budget), small) : nanv;
+    const double R_discrete = (dt_frame>0.) ? dK_full_dt_eff - sumP : nanv;
+    const double R_discrete_norm = (dt_frame>0.) ? R_discrete/std::max(sumAbsP, small) : nanv;
+    const double viscous_power_defect = (dt_frame>0.) ? Pdisc[BUDGET_VISC] + eps_full_budget : nanv;
+    const double viscous_power_defect_norm = (dt_frame>0.) ? viscous_power_defect/std::max(eps_full_budget, small) : nanv;
+    const double particle_power_defect = (dt_frame>0.) ? Pdisc[BUDGET_PARTICLE] - Wp_full_budget : nanv;
+    const double particle_power_defect_norm = (dt_frame>0.) ? particle_power_defect/std::max(fabs(Wp_full_budget), small) : nanv;
+    const double PPF_full_asym_budget = (Wp_full_pos_budget-Wp_full_neg_budget) / std::max(Wp_full_pos_budget+Wp_full_neg_budget, small);
 
     if(rank==0) {
         char filename[512];
         sprintf(filename, "%s/frame_diagnostics.%05d", dirname, frame_num);
         FILE *fh = p_safe_fopen(filename, "w");
-        fprintf(fh,"K_full %.17g\nK_fluid %.17g\n", global[0], global[1]);
-        fprintf(fh,"eps_full %.17g\neps_fluid %.17g\n", global[2], global[3]);
-        fprintf(fh,"Wp_full %.17g\nWp_full_pos %.17g\nWp_full_neg %.17g\nWp_full_abs %.17g\nPPF_full_asymmetry %.17g\n", global[4], global[5], global[6], global[7], PPF_full_asym);
+        fprintf(fh,"time %.17g\nframe_index %d\ndt_frame %.17g\nnsteps_accumulated %d\n", time, frame_num, dt_frame, budget.nsteps_accumulated);
+        fprintf(fh,"K_full %.17g\nK_full_prev %.17g\ndK_full %.17g\ndK_full_dt_eff %.17g\n", global[0], K_full_prev, dK_full, dK_full_dt_eff);
+        fprintf(fh,"K_fluid %.17g\n", global[1]);
+        fprintf(fh,"epsilon_full %.17g\neps_full %.17g\neps_fluid %.17g\n", eps_full_budget, eps_full_budget, global[3]);
+        fprintf(fh,"Wp_full %.17g\nWp_full_pos %.17g\nWp_full_neg %.17g\nWp_full_abs %.17g\nPPF_full_asymmetry %.17g\n", Wp_full_budget, Wp_full_pos_budget, Wp_full_neg_budget, Wp_full_abs_budget, PPF_full_asym_budget);
         fprintf(fh,"Wp_fluid %.17g\nWp_fluid_pos %.17g\nWp_fluid_neg %.17g\nWp_fluid_abs %.17g\nPPF_fluid_asymmetry %.17g\n", global[8], global[9], global[10], global[11], PPF_fluid_asym);
         fprintf(fh,"ubar_full_x %.17g\nubar_full_y %.17g\nubar_full_z %.17g\n", g_frame_ubar_full[0], g_frame_ubar_full[1], g_frame_ubar_full[2]);
         fprintf(fh,"ubar_fluid_x %.17g\nubar_fluid_y %.17g\nubar_fluid_z %.17g\n", g_frame_ubar_fluid[0], g_frame_ubar_fluid[1], g_frame_ubar_fluid[2]);
-        fprintf(fh,"dK_full_dt %.17g\ndK_fluid_dt %.17g\n", nanv, nanv);
-        fprintf(fh,"residual_full %.17g\nresidual_full_normalized %.17g\nresidual_fluid %.17g\nresidual_fluid_normalized %.17g\n", nanv, nanv, nanv, nanv);
+         fprintf(fh,"dK_full_dt %.17g\ndK_fluid_dt %.17g\n", dK_full_dt_eff, nanv);
+        fprintf(fh,"P_adv_disc %.17g\nP_visc_disc %.17g\nP_particle_disc %.17g\nP_projection_disc %.17g\nP_constraint_disc %.17g\nP_contact_disc %.17g\nP_penalty_disc %.17g\nP_reset_disc %.17g\nP_filter_disc %.17g\nP_external_disc %.17g\nP_other_disc %.17g\nP_split_remainder_disc %.17g\n",
+                Pdisc[BUDGET_ADV], Pdisc[BUDGET_VISC], Pdisc[BUDGET_PARTICLE], Pdisc[BUDGET_PROJECTION], Pdisc[BUDGET_CONSTRAINT], Pdisc[BUDGET_CONTACT], Pdisc[BUDGET_PENALTY], Pdisc[BUDGET_RESET], Pdisc[BUDGET_FILTER], Pdisc[BUDGET_EXTERNAL], Pdisc[BUDGET_OTHER], Pdisc[BUDGET_SPLIT_REMAINDER]);
+        fprintf(fh,"dK_adv %.17g\ndK_visc %.17g\ndK_particle %.17g\ndK_projection %.17g\ndK_constraint %.17g\ndK_contact %.17g\ndK_penalty %.17g\ndK_reset %.17g\ndK_filter %.17g\ndK_external %.17g\ndK_other %.17g\ndK_split_remainder %.17g\n",
+                budget.dK[BUDGET_ADV], budget.dK[BUDGET_VISC], budget.dK[BUDGET_PARTICLE], budget.dK[BUDGET_PROJECTION], budget.dK[BUDGET_CONSTRAINT], budget.dK[BUDGET_CONTACT], budget.dK[BUDGET_PENALTY], budget.dK[BUDGET_RESET], budget.dK[BUDGET_FILTER], budget.dK[BUDGET_EXTERNAL], budget.dK[BUDGET_OTHER], budget.dK[BUDGET_SPLIT_REMAINDER]);
+        fprintf(fh,"R_classical %.17g\nR_classical_norm %.17g\nR_discrete %.17g\nR_discrete_norm %.17g\n", R_classical, R_classical_norm, R_discrete, R_discrete_norm);
+        fprintf(fh,"viscous_power_defect %.17g\nviscous_power_defect_norm %.17g\nparticle_power_defect %.17g\nparticle_power_defect_norm %.17g\nvelocity_identity_error %.17g\n", viscous_power_defect, viscous_power_defect_norm, particle_power_defect, particle_power_defect_norm, velocity_identity_error);
+        fprintf(fh,"P_eff_from_velocity_increment %.17g\nsum_abs_discrete_power %.17g\n", P_eff_from_velocity_increment, sumAbsP);
+        fprintf(fh,"residual_full %.17g\nresidual_full_normalized %.17g\nresidual_fluid %.17g\nresidual_fluid_normalized %.17g\n", R_classical, R_classical_norm, nanv, nanv);
         fprintf(fh,"fp_rhs_stressdiv_l2_rel_error %.17g\nfp_rhs_stressdiv_linf_rel_error %.17g\n", fp_l2_rel, fp_linf_rel);
         fprintf(fh,"ppe_centered_vs_solver_l2_rel_error %.17g\n", ppe_centered_rel);
         fprintf(fh,"ppf_force_mean %.17g\nppf_stress_mean %.17g\nppf_force_stress_rel_error %.17g\n", global[8], nanv, nanv);
@@ -1583,11 +1621,20 @@ void fluid_3d::write_3d_metadata(const char* dirname,const int frame_num) {
     write_scalar_attr(fh,"/fields/chi_p","1 for particle/solid cells and 0 for carrier-fluid cells; chi_f + chi_p = 1","dimensionless","mask",this,frame_num);
     write_scalar_attr(fh,"/fields/sigma_total_xx","total solver stress tensor component averaged from face stresses; mixed stress, not pure elastic sigma_e","stress-like solver units","diagnostic total stress",this,frame_num);
     write_attr(fh,"/diagnostics/K_full","budget_domain","full-domain one-fluid");
+     write_attr(fh,"/diagnostics/K_full","budget_energy_definition","K_full = 0.5 <|u - <u>|^2>");
+    write_attr(fh,"/diagnostics/discrete_budget","budget_interval","between previous frame and current frame");
+    write_attr(fh,"/diagnostics/discrete_budget","budget_power_type","frame-interval averaged discrete energy increments");
+    write_attr(fh,"/diagnostics/discrete_budget","fluctuation_mean","full-domain mean velocity");
+    write_attr(fh,"/diagnostics/discrete_budget","volume_average","full-domain arithmetic average over solver cells");
+    write_attr(fh,"/diagnostics/discrete_budget","linear_power_time_layer","combined explicit ustar split uses substep u_before fluctuation velocity; exact quadratic/cross remainder is P_split_remainder_disc");
+    write_attr(fh,"/diagnostics/discrete_budget","debug_rhs_fields","not written by default; scalar diagnostics close the solver-discrete full-domain TKE budget with minimal IO");
     write_attr(fh,"/diagnostics/K_fluid","budget_domain","carrier-fluid masked");
-    write_attr(fh,"/diagnostics/dK_full_dt","definition","NaN online because future frame is unavailable; compute from K_full time series in post-processing");
-    write_attr(fh,"/diagnostics/dK_fluid_dt","definition","NaN online because future frame is unavailable; compute from K_fluid time series in post-processing");
-    write_attr(fh,"/diagnostics/residual_full","definition","dK_full_dt + eps_full - Wp_full; NaN online until dK_full_dt is available");
-    write_attr(fh,"/diagnostics/residual_fluid","definition","dK_fluid_dt + eps_fluid - Wp_fluid; NaN online until dK_fluid_dt is available");
+     write_attr(fh,"/diagnostics/dK_full_dt","definition","same as dK_full_dt_eff = (K_full current frame - K_full previous frame)/dt_frame");
+    write_attr(fh,"/diagnostics/dK_fluid_dt","definition","NaN online; discrete closure is currently implemented for full-domain K_full");
+    write_attr(fh,"/diagnostics/R_classical","definition","dK_full_dt_eff + epsilon_full - Wp_full");
+    write_attr(fh,"/diagnostics/R_discrete","definition","dK_full_dt_eff - sum(P_*_disc), where P_*_disc are solver-aligned discrete energy increments divided by dt_frame");
+    write_attr(fh,"/diagnostics/residual_full","definition","alias of R_classical for backward compatibility");
+    write_attr(fh,"/diagnostics/residual_fluid","definition","NaN online; full-domain discrete closure is the formal budget");
     write_attr(fh,"/diagnostics/ubar_full_x","average_definition","full-domain spatial average");
     write_attr(fh,"/diagnostics/ubar_fluid_x","average_definition","chi_f-weighted carrier-fluid spatial average");
     write_attr(fh,"/particles","particle_power_support","forcing/particle-interior nearest-center assigned using ppf3d_full and cached fp_rhs_total support");
